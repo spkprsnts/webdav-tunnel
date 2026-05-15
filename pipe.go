@@ -175,7 +175,7 @@ func (p *Pipe) WatchDone() {
 
 			_, status, _ := p.dav.Get(p.ctx, fmt.Sprintf("tunnel/%s/done", p.sessionID))
 			if status == 200 {
-				log.Printf("[%s] получен сигнал done", p.sessionID)
+				log.Printf("[%s] remote signaled done", p.sessionID)
 				p.doneOnce.Do(func() { close(p.doneCh) })
 				return
 			}
@@ -254,9 +254,9 @@ func (p *Pipe) startWriter() {
 						return
 					}
 					attempts++
-					log.Printf("[%s] PUT retry seq %d (attempt %d): %v", p.sessionID, s, attempts, err)
+					log.Printf("[%s] PUT seq=%d attempt=%d: %v", p.sessionID, s, attempts, err)
 					if attempts >= 15 {
-						log.Printf("[%s] fatal: too many PUT errors, aborting pipe", p.sessionID)
+						log.Printf("[%s] too many PUT failures, aborting pipe", p.sessionID)
 						p.doneOnce.Do(func() { close(p.doneCh) })
 						return
 					}

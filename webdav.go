@@ -76,7 +76,7 @@ func (w *WebDAV) Put(ctx context.Context, path string, data []byte) error {
 		return err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV RATE LIMIT (429 Too Many Requests) на PUT %s", path)
+		log.Printf("WebDAV 429 rate limited: PUT %s", path)
 	}
 	io.Copy(io.Discard, resp.Body) // Обязательно вычитываем ответ, чтобы переиспользовать TCP
 	resp.Body.Close()
@@ -103,7 +103,7 @@ func (w *WebDAV) Get(ctx context.Context, path string) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV RATE LIMIT (429 Too Many Requests) на GET %s", path)
+		log.Printf("WebDAV 429 rate limited: GET %s", path)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -128,7 +128,7 @@ func (w *WebDAV) Delete(ctx context.Context, path string) error {
 		return err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV RATE LIMIT (429 Too Many Requests) на DELETE %s", path)
+		log.Printf("WebDAV 429 rate limited: DELETE %s", path)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -149,7 +149,7 @@ func (w *WebDAV) Mkcol(ctx context.Context, path string) error {
 		return err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV RATE LIMIT (429 Too Many Requests) на MKCOL %s", path)
+		log.Printf("WebDAV 429 rate limited: MKCOL %s", path)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -181,7 +181,7 @@ func (w *WebDAV) Propfind(ctx context.Context, path string) ([]string, error) {
 		return nil, err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV RATE LIMIT (429 Too Many Requests) на PROPFIND %s", path)
+		log.Printf("WebDAV 429 rate limited: PROPFIND %s", path)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -242,6 +242,28 @@ func (w *WebDAV) ListSessions(ctx context.Context) ([]string, error) {
 		}
 	}
 	return sessions, nil
+}
+
+// Ping checks WebDAV connectivity and authentication via OPTIONS request.
+func (w *WebDAV) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "OPTIONS", w.baseURL+"/", nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(w.login, w.password)
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == 401 {
+		return fmt.Errorf("authentication failed (401 Unauthorized)")
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned %s", resp.Status)
+	}
+	return nil
 }
 
 func lastPathSegment(href string) string {

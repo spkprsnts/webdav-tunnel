@@ -24,15 +24,25 @@ func main() {
 	flag.Parse()
 
 	if *webdavURL == "" || *login == "" || *password == "" {
-		log.Fatal("обязательны флаги: -webdav, -login, -password")
+		log.Fatal("required flags: -webdav, -login, -password")
 	}
 
 	dav := NewWebDAV(*webdavURL, *login, *password, *timeout)
 
+	log.Printf("WebDAV: connecting to %s...", *webdavURL)
+	pingStart := time.Now()
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := dav.Ping(pingCtx); err != nil {
+		pingCancel()
+		log.Fatalf("WebDAV: connection failed: %v", err)
+	}
+	pingCancel()
+	log.Printf("WebDAV: OK (%dms)", time.Since(pingStart).Milliseconds())
+
 	switch *mode {
 	case "client":
 		if *listen == "" {
-			log.Fatal("-listen обязателен для mode client")
+			log.Fatal("-listen required for client mode")
 		}
 		runProxy(dav, *listen)
 
@@ -40,7 +50,7 @@ func main() {
 		runServer(dav, *target)
 
 	default:
-		log.Fatal("-mode должен быть: client | server")
+		log.Fatal("-mode must be: client | server")
 	}
 }
 
@@ -56,7 +66,7 @@ func runProxy(dav *WebDAV, listenAddr string) {
 	if err != nil {
 		log.Fatalf("listen %s: %v", listenAddr, err)
 	}
-	log.Printf("SOCKS5 proxy слушает на %s", listenAddr)
+	log.Printf("SOCKS5 proxy listening on %s", listenAddr)
 
 	// Буфер входящих соединений — накапливаются пока mux переподключается
 	connCh := make(chan net.Conn, 128)
@@ -64,7 +74,7 @@ func runProxy(dav *WebDAV, listenAddr string) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				log.Printf("accept: %v", err)
+				log.Printf("accept error: %v", err)
 				continue
 			}
 			connCh <- conn
@@ -75,7 +85,7 @@ func runProxy(dav *WebDAV, listenAddr string) {
 		sid := newSessionID()
 		pipe := NewPipe(dav, sid, "c2s", "s2c")
 		if err := pipe.Init(); err != nil {
-			log.Printf("[%s] pipe init: %v", sid, err)
+			log.Printf("[%s] pipe init failed: %v", sid, err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -86,20 +96,20 @@ func runProxy(dav *WebDAV, listenAddr string) {
 
 		muxSess, err := yamux.Client(NewPipeConn(pipe), yamuxConfig())
 		if err != nil {
-			log.Printf("[%s] yamux client: %v", sid, err)
+			log.Printf("[%s] yamux error: %v", sid, err)
 			close(hbDone)
 			pipe.Cleanup()
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		log.Printf("[%s] mux установлен", sid)
+		log.Printf("[%s] mux ready", sid)
 
 		proxyMuxLoop(muxSess, connCh)
 
 		muxSess.Close()
 		close(hbDone)
 		pipe.Cleanup()
-		log.Printf("[%s] mux закрыт, переподключение...", sid)
+		log.Printf("[%s] mux closed, reconnecting...", sid)
 		time.Sleep(time.Second)
 	}
 }
@@ -109,9 +119,9 @@ func runProxy(dav *WebDAV, listenAddr string) {
 func runServer(dav *WebDAV, overrideTarget string) {
 	ensureTunnelDir(dav)
 	if overrideTarget != "" {
-		log.Printf("server: SOCKS5-выход, все стримы → %s", overrideTarget)
+		log.Printf("server mode: all streams forced to %s", overrideTarget)
 	} else {
-		log.Printf("server: SOCKS5-выход (динамический адрес)")
+		log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
 	}
 	go startupCleanup(dav)
 
@@ -121,7 +131,7 @@ func runServer(dav *WebDAV, overrideTarget string) {
 	for {
 		sessions, err := dav.ListSessions(context.Background())
 		if err != nil {
-			log.Printf("list sessions: %v", err)
+			log.Printf("list sessions error: %v", err)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
@@ -164,7 +174,7 @@ func startupCleanup(dav *WebDAV) {
 	if len(sids) == 0 {
 		return
 	}
-	log.Printf("startup: завершаю %d сессий в фоне", len(sids))
+	log.Printf("startup: terminating %d stale sessions", len(sids))
 	var wg sync.WaitGroup
 	for _, sid := range sids {
 		wg.Add(1)
@@ -184,12 +194,12 @@ func startupCleanup(dav *WebDAV) {
 		}(sid)
 	}
 	wg.Wait()
-	log.Printf("startup: cleanup завершён")
+	log.Printf("startup: cleanup complete")
 }
 
 func ensureTunnelDir(dav *WebDAV) {
 	if err := dav.Mkcol(context.Background(), "tunnel"); err != nil {
-		log.Printf("warning: mkcol tunnel: %v", err)
+		log.Printf("warning: mkcol tunnel dir: %v", err)
 	}
 }
 

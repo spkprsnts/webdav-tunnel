@@ -69,20 +69,20 @@ func proxyStream(mux *yamux.Session, conn net.Conn) {
 
 	stream, err := mux.Open()
 	if err != nil {
-		log.Printf("mux open: %v", err)
+		log.Printf("mux stream open failed: %v", err)
 		return
 	}
 	defer stream.Close()
 
 	id := streamCounter.Add(1)
-	log.Printf("[s%d] SOCKS5 → %s:%d", id, host, port)
+	log.Printf("[s%d] SOCKS5 connect %s:%d", id, host, port)
 
 	if err := writeStreamTarget(stream, host, port); err != nil {
 		return
 	}
 
 	relayStreams(conn, stream)
-	log.Printf("[s%d] готово", id)
+	log.Printf("[s%d] closed", id)
 }
 
 // ── server: yamux-сервер ──────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ func proxyStream(mux *yamux.Session, conn net.Conn) {
 // serverMuxSession создаёт yamux-сессию поверх WebDAV-пайпа и принимает стримы.
 func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 	if age := dav.SessionAge(context.Background(), sid); age > staleSessionAge {
-		log.Printf("[%s] устаревшая сессия (возраст %v), удаляю", sid, age.Round(time.Second))
+		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
 		dav.Delete(context.Background(), "tunnel/"+sid)
 		return
 	}
@@ -98,10 +98,10 @@ func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 	pipe := NewPipe(dav, sid, "s2c", "c2s")
 	muxSess, err := yamux.Server(NewPipeConn(pipe), yamuxConfig())
 	if err != nil {
-		log.Printf("[%s] yamux server: %v", sid, err)
+		log.Printf("[%s] yamux server error: %v", sid, err)
 		return
 	}
-	log.Printf("[%s] mux принят", sid)
+	log.Printf("[%s] mux accepted", sid)
 
 	for {
 		stream, err := muxSess.Accept()
@@ -112,7 +112,7 @@ func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 	}
 
 	muxSess.Close()
-	log.Printf("[%s] mux сессия завершена", sid)
+	log.Printf("[%s] mux session closed", sid)
 }
 
 // serverStream обрабатывает один yamux-стрим: читает цель и реле-ит трафик.
@@ -132,16 +132,16 @@ func serverStream(stream net.Conn, connectAddr string) {
 		target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	}
 
-	log.Printf("[s%d] → %s", id, target)
+	log.Printf("[s%d] connecting to %s", id, target)
 	conn, err := net.DialTimeout("tcp", target, 15*time.Second)
 	if err != nil {
-		log.Printf("[s%d] dial %s: %v", id, target, err)
+		log.Printf("[s%d] dial %s failed: %v", id, target, err)
 		return
 	}
 	defer conn.Close()
 
 	relayStreams(stream, conn)
-	log.Printf("[s%d] готово", id)
+	log.Printf("[s%d] closed", id)
 }
 
 // ── общее ─────────────────────────────────────────────────────────────────────
