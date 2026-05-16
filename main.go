@@ -16,15 +16,14 @@ import (
 
 func main() {
 	mode := flag.String("mode", "", "client | server")
-	webdavURL := flag.String("webdav", "", "WebDAV URL (напр. https://webdav.yandex.ru)")
-	login := flag.String("login", "", "WebDAV логин")
-	password := flag.String("password", "", "WebDAV пароль / пароль приложения")
-	listen := flag.String("socks-listen", "", "адрес прослушивания SOCKS5 (для mode client)")
-	socksUser := flag.String("socks-user", "", "логин для SOCKS5 (client mode, необязательно)")
-	socksPass := flag.String("socks-pass", "", "пароль для SOCKS5 (client mode, необязательно)")
-	target := flag.String("target", "", "принудительный target для всех стримов (для mode server, необязательно)")
-	proxyStr := flag.String("proxy", "", "upstream SOCKS5-прокси для сервера: socks5://[user:pass@]host:port")
-	timeout := flag.Duration("timeout", 60*time.Second, "таймаут HTTP-запросов")
+	webdavURL := flag.String("webdav", "", "WebDAV base URL")
+	login := flag.String("login", "", "WebDAV username")
+	password := flag.String("password", "", "WebDAV password / app password")
+	listen := flag.String("socks-listen", "", "address to listen for SOCKS5 connections (client mode)")
+	socksUser := flag.String("socks-user", "", "SOCKS5 proxy username (client mode, optional)")
+	socksPass := flag.String("socks-pass", "", "SOCKS5 proxy password (client mode, optional)")
+	proxyStr := flag.String("proxy", "", "upstream SOCKS5 proxy for the server: socks5://[user:pass@]host:port")
+	timeout := flag.Duration("timeout", 60*time.Second, "HTTP request timeout")
 	flag.Parse()
 
 	if *webdavURL == "" || *login == "" || *password == "" {
@@ -66,7 +65,7 @@ func main() {
 				proxy.pass, _ = u.User.Password()
 			}
 		}
-		runServer(dav, *target, proxy)
+		runServer(dav, proxy)
 
 	default:
 		log.Fatal("-mode must be: client | server")
@@ -74,9 +73,6 @@ func main() {
 }
 
 // ── proxy (SOCKS5 + yamux) ────────────────────────────────────────────────────
-//
-// Один WebDAV-пайп на весь клиент. Каждое SOCKS5-соединение — отдельный yamux-стрим.
-// При разрыве пайпа клиент автоматически создаёт новый.
 
 func runProxy(dav *WebDAV, listenAddr, socksUser, socksPass string) {
 	ensureTunnelDir(dav)
@@ -87,7 +83,7 @@ func runProxy(dav *WebDAV, listenAddr, socksUser, socksPass string) {
 	}
 	log.Printf("SOCKS5 proxy listening on %s", listenAddr)
 
-	// Буфер входящих соединений — накапливаются пока mux переподключается
+	// Buffer incoming connections while the mux reconnects.
 	connCh := make(chan net.Conn, 128)
 	go func() {
 		for {
@@ -133,15 +129,11 @@ func runProxy(dav *WebDAV, listenAddr, socksUser, socksPass string) {
 	}
 }
 
-// ── server (yamux-выход) ──────────────────────────────────────────────────────
+// ── server (yamux exit node) ──────────────────────────────────────────────────
 
-func runServer(dav *WebDAV, overrideTarget string, proxy *proxyConfig) {
+func runServer(dav *WebDAV, proxy *proxyConfig) {
 	ensureTunnelDir(dav)
-	if overrideTarget != "" {
-		log.Printf("server mode: all streams forced to %s", overrideTarget)
-	} else {
-		log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
-	}
+	log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
 	if proxy != nil {
 		log.Printf("server mode: routing through SOCKS5 proxy %s", proxy.addr)
 	}
@@ -153,8 +145,8 @@ func runServer(dav *WebDAV, overrideTarget string, proxy *proxyConfig) {
 	known := make(map[string]*sessionEntry)
 	var mu sync.Mutex
 
-	// Периодически очищаем завершённые сессии (не раньше 5 мин после закрытия,
-	// чтобы не переобработать сессию при медленном удалении файлов на WebDAV).
+	// Periodically remove closed sessions (kept for 5 min to avoid re-processing
+	// a session while WebDAV file deletion is still in flight).
 	go func() {
 		for {
 			time.Sleep(5 * time.Minute)
@@ -186,7 +178,7 @@ func runServer(dav *WebDAV, overrideTarget string, proxy *proxyConfig) {
 				continue
 			}
 			go func(id string) {
-				serverMuxSession(dav, id, overrideTarget, proxy)
+				serverMuxSession(dav, id, proxy)
 				mu.Lock()
 				if e, ok := known[id]; ok {
 					e.closedAt = time.Now()
@@ -198,7 +190,7 @@ func runServer(dav *WebDAV, overrideTarget string, proxy *proxyConfig) {
 	}
 }
 
-// ── общее ─────────────────────────────────────────────────────────────────────
+// ── shared ────────────────────────────────────────────────────────────────────
 
 func startupCleanup(dav *WebDAV) {
 	ctx := context.Background()

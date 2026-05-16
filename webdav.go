@@ -51,7 +51,7 @@ func NewWebDAV(baseURL, login, password string, timeout time.Duration) *WebDAV {
 			Timeout:   10 * time.Second,
 			KeepAlive: 15 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     false, // Отключаем HTTP/2 (Cloudflare часто "вешает" потоки ботов)
+		ForceAttemptHTTP2:     false, // HTTP/2 disabled: some cloud providers throttle or fingerprint bot HTTP/2 traffic
 		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
@@ -72,7 +72,7 @@ type cfTransport struct {
 }
 
 func (t *cfTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Маскируемся под обычный браузер, чтобы снизить Bot Score в Cloudflare
+	// Mimic a regular browser to reduce Cloudflare Bot Score.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 	return t.rt.RoundTrip(req)
 }
@@ -115,7 +115,7 @@ func (w *WebDAV) Get(ctx context.Context, path string) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	req.SetBasicAuth(w.login, w.password)
-	// Запрещаем Cloudflare и прокси-серверам кэшировать 404 ошибки
+	// Prevent Cloudflare and proxy caches from serving stale 404s.
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	req.Header.Set("Pragma", "no-cache")
 	resp, err := w.client.Do(req)
@@ -185,8 +185,8 @@ func (w *WebDAV) Mkcol(ctx context.Context, path string) error {
 }
 
 func (w *WebDAV) Propfind(ctx context.Context, path string, depth string) ([]string, error) {
-	// Для директорий добавляем слеш на конце.
-	// Иначе Apache вернёт 301 редирект, который Go пройдёт обычным GET-запросом и получит HTML страницу автоиндекса.
+	// Trailing slash required for directories: without it Apache returns a 301
+	// that Go follows with a plain GET, receiving an HTML index page instead.
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
@@ -233,8 +233,8 @@ func (w *WebDAV) Propfind(ctx context.Context, path string, depth string) ([]str
 	return out, nil
 }
 
-// SessionAge возвращает время с последнего heartbeat.
-// Возвращает -1 если файл hb не существует (новая сессия).
+// SessionAge returns the time elapsed since the last heartbeat.
+// Returns -1 if the hb file does not exist (new session).
 func (w *WebDAV) SessionAge(ctx context.Context, sid string) time.Duration {
 	data, status, _ := w.Get(ctx, "tunnel/"+sid+"/hb")
 	if status != 200 || len(data) == 0 {
@@ -247,9 +247,9 @@ func (w *WebDAV) SessionAge(ctx context.Context, sid string) time.Duration {
 	return time.Since(time.Unix(ts, 0))
 }
 
-// ListSessions returns session IDs found under tunnel/ directory.
-// Возвращает только сессии, у которых есть файл init —
-// это означает что клиент завершил Init() и все поддиректории уже созданы.
+// ListSessions returns session IDs found under the tunnel/ directory.
+// Only sessions with an init file are returned — that file signals the client
+// has finished Init() and all subdirectories are ready.
 func (w *WebDAV) ListSessions(ctx context.Context) ([]string, error) {
 	hrefs, err := w.Propfind(ctx, "tunnel", "1")
 	if err != nil || hrefs == nil {
@@ -264,7 +264,7 @@ func (w *WebDAV) ListSessions(ctx context.Context) ([]string, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	// Проверяем init-файлы параллельно.
+	// Check init files in parallel.
 	type result struct {
 		id string
 		ok bool

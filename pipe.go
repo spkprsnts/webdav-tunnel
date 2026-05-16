@@ -15,15 +15,14 @@ import (
 )
 
 const (
-	pollInterval       = 500 * time.Millisecond // Верхний предел паузы между опросами (при простое)
-	minPollInterval    = 200 * time.Millisecond // Начальная пауза при адаптивном backoff (50ms для VPS)
-	coalesceDelay      = 10 * time.Millisecond  // Окно склейки мелких записей в writer'е
-	chunkDataSize      = 128*1024 - 1           // Оптимальный размер чанка, чтобы не ловить таймауты
-	maxConcurrentPuts  = 8                      // Лимит параллельных отправок
+	pollInterval       = 500 * time.Millisecond // maximum poll backoff when idle
+	minPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff (50ms for VPS)
+	coalesceDelay      = 10 * time.Millisecond  // write coalescing window
+	chunkDataSize      = 128*1024 - 1           // chunk size chosen to avoid cloud timeouts
+	maxConcurrentPuts  = 8                      // parallel upload limit
 	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
 	maxReadAheadWindow = 8                      // maximum concurrent GETs under load (raise to improve upload throughput)
 
-	// --- ОБЩИЕ ТАЙМАУТЫ ---
 	idleTimeout = 90 * time.Second
 
 	heartbeatInterval = 30 * time.Second
@@ -45,11 +44,11 @@ type Pipe struct {
 	readSeq   atomic.Int64
 	closed    atomic.Bool
 
-	// ctx отменяется при Close() или когда doneCh закрывается.
+	// ctx is cancelled on Close() or when doneCh is closed.
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// doneCh закрывается когда от другой стороны получен сигнал done.
+	// doneCh is closed when the remote side signals done.
 	doneCh   chan struct{}
 	doneOnce sync.Once
 
@@ -80,8 +79,7 @@ func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string) *Pipe {
 		readCh:    make(chan []byte, 128),
 		putSem:    make(chan struct{}, maxConcurrentPuts),
 	}
-	// Когда doneCh закрывается — немедленно отменяем контекст,
-	// чтобы прервать все зависшие HTTP-запросы.
+	// When doneCh closes, cancel the context immediately to abort stalled HTTP requests.
 	go func() {
 		<-p.doneCh
 		p.cancel()
@@ -93,7 +91,7 @@ func (p *Pipe) chunkPath(dir string, seq int64) string {
 	return fmt.Sprintf("tunnel/%s/%s/%010d.bin", p.sessionID, dir, seq)
 }
 
-// Init создаёт директории и файл init (маркер готовности).
+// Init creates the session directories and the init marker file.
 func (p *Pipe) Init() error {
 	base := fmt.Sprintf("tunnel/%s", p.sessionID)
 	for _, path := range []string{"tunnel", base} {
@@ -101,7 +99,7 @@ func (p *Pipe) Init() error {
 			return fmt.Errorf("mkcol %s: %w", path, err)
 		}
 	}
-	// Поддиректории независимы — создаём параллельно.
+	// Subdirectories are independent — create in parallel.
 	type mkcolResult struct {
 		path string
 		err  error
@@ -121,13 +119,13 @@ func (p *Pipe) Init() error {
 	return p.dav.Put(p.ctx, base+"/init", []byte("ok"))
 }
 
-// WriteTarget записывает цель подключения в постоянный файл (не чанк).
+// WriteTarget writes the connection target to a persistent file (not a chunk).
 func (p *Pipe) WriteTarget(host string, port uint16) error {
 	content := fmt.Sprintf("%s\n%d", host, port)
 	return p.dav.Put(p.ctx, fmt.Sprintf("tunnel/%s/target", p.sessionID), []byte(content))
 }
 
-// ReadTarget ждёт появления target файла. Таймаут: 30 секунд.
+// ReadTarget waits for the target file to appear (timeout: 30 seconds).
 func (p *Pipe) ReadTarget() (host string, port uint16, err error) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -153,7 +151,7 @@ func (p *Pipe) ReadTarget() (host string, port uint16, err error) {
 	return "", 0, fmt.Errorf("timeout waiting for target")
 }
 
-// StartHeartbeat запускает фоновую горутину, обновляющую hb каждые 30 с.
+// StartHeartbeat starts a background goroutine that updates the hb file every 30 s.
 func (p *Pipe) StartHeartbeat(done <-chan struct{}) {
 	p.writeHeartbeat()
 	go func() {
@@ -175,16 +173,16 @@ func (p *Pipe) writeHeartbeat() {
 	p.dav.Put(p.ctx, fmt.Sprintf("tunnel/%s/hb", p.sessionID), []byte(ts))
 }
 
-// SignalDone записывает маркер завершения для другой стороны.
-// Использует свежий контекст — p.ctx к этому моменту может быть отменён.
+// SignalDone writes a done marker for the remote side.
+// Uses a fresh context because p.ctx may already be cancelled.
 func (p *Pipe) SignalDone() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	p.dav.Put(ctx, fmt.Sprintf("tunnel/%s/done", p.sessionID), []byte("1"))
 }
 
-// WatchDone запускает фоновую горутину, которая опрашивает файл done раз в 3 с.
-// Когда файл появляется — закрывает doneCh (что автоматически отменяет p.ctx).
+// WatchDone starts a background goroutine that polls the done file every 3 s.
+// When the file appears it closes doneCh, which in turn cancels p.ctx.
 func (p *Pipe) WatchDone() {
 	go func() {
 		for {
@@ -250,7 +248,7 @@ func (p *Pipe) startWriter() {
 			}
 
 			seq := p.writeSeq.Add(1)
-			eofChunk := isEOF && n == 0 // EOF только когда данных нет — отдельный маркер
+			eofChunk := isEOF && n == 0 // EOF-only chunk: separate sentinel when no data remains
 
 			payload := make([]byte, 1+8+n)
 			if eofChunk {
@@ -321,8 +319,8 @@ func (p *Pipe) startWriter() {
 		}
 	}
 
-	// Главный цикл слушает doneCh (не ctx.Done!), чтобы Close() мог
-	// сначала закрыть writeCh и дождаться финального flush перед отменой контекста.
+	// Main loop listens on doneCh (not ctx.Done!) so Close() can first close writeCh,
+	// wait for the final flush, and only then cancel the context.
 	for {
 		select {
 		case <-p.doneCh:
@@ -481,7 +479,7 @@ func (p *Pipe) startReader() {
 func (p *Pipe) Write(data []byte) (err error) {
 	defer func() {
 		if recover() != nil {
-			err = io.EOF // паника "send on closed channel" при гонке Close/Write
+			err = io.EOF // "send on closed channel" panic from a Close/Write race
 		}
 	}()
 	p.startOnce.Do(p.start)
@@ -520,11 +518,11 @@ func (p *Pipe) Close() {
 	if p.closed.Swap(true) {
 		return
 	}
-	// Закрываем writeCh → startWriter сделает финальный flush и отправит EOF-чанк.
+	// Closing writeCh causes startWriter to do a final flush and send the EOF chunk.
 	p.startOnce.Do(p.start)
 	close(p.writeCh)
 
-	// Ждём пока все PUT-горутины завершатся (EOF доставлен другой стороне).
+	// Wait until all PUT goroutines finish (EOF delivered to the remote side).
 	waitCh := make(chan struct{})
 	go func() {
 		p.wg.Wait()
@@ -536,12 +534,12 @@ func (p *Pipe) Close() {
 	case <-time.After(15 * time.Second):
 	}
 
-	// Только теперь отменяем контекст — прерываем зависшие GET-горутины.
+	// Only now cancel the context — aborts stalled GET goroutines.
 	p.cancel()
 }
 
-// Cleanup удаляет директорию сессии на WebDAV.
-// Использует свежий контекст — p.ctx к этому моменту уже отменён.
+// Cleanup deletes the session directory from WebDAV.
+// Uses a fresh context because p.ctx is already cancelled by this point.
 func (p *Pipe) Cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -569,8 +567,8 @@ func (p *Pipe) recordLatency(d time.Duration) {
 	}
 }
 
-// PipeConn адаптирует Pipe к io.ReadWriteCloser для yamux.
-// Read буферизует чанки, чтобы удовлетворять произвольные размеры чтения.
+// PipeConn adapts Pipe to io.ReadWriteCloser for yamux.
+// Read buffers chunks to satisfy arbitrary read sizes.
 type PipeConn struct {
 	pipe *Pipe
 	buf  []byte

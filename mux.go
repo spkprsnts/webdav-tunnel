@@ -17,14 +17,13 @@ import (
 )
 
 const (
-	// --- НАСТРОЙКИ YAMUX ---
-	// Формула: window = RTT × желаемый_throughput
-	muxWindowSize = 24 * 1024 * 1024 // 4 МБ
+	// window = RTT × desired_throughput
+	muxWindowSize = 24 * 1024 * 1024
 )
 
-// proxyConfig задаёт upstream SOCKS5-прокси для исходящих соединений сервера.
+// proxyConfig holds upstream SOCKS5 proxy settings for outbound server connections.
 type proxyConfig struct {
-	addr string // host:port прокси
+	addr string // host:port
 	user string
 	pass string
 }
@@ -33,21 +32,21 @@ var streamCounter atomic.Int64
 
 func yamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = false // используем собственный heartbeat
+	cfg.EnableKeepAlive = false // we use our own heartbeat
 	cfg.ConnectionWriteTimeout = 120 * time.Second
 	cfg.MaxStreamWindowSize = uint32(muxWindowSize)
 	cfg.LogOutput = io.Discard
 	return cfg
 }
 
-// ── proxy: yamux-клиент ───────────────────────────────────────────────────────
+// ── proxy: yamux client ───────────────────────────────────────────────────────
 
 const streamPoolSize = 16
 
-// proxyMuxLoop принимает SOCKS5-соединения из connCh и открывает yamux-стримы.
-// Поддерживает пул заранее открытых стримов, чтобы устранить задержку SYN/ACK
-// (~5s на медленном WebDAV) из критического пути установки соединения.
-// Завершается когда mux закрыт.
+// proxyMuxLoop accepts SOCKS5 connections from connCh and opens yamux streams.
+// It maintains a pool of pre-opened streams to eliminate the SYN/ACK latency
+// (~5 s on slow WebDAV) from the connection setup hot path.
+// Returns when the mux session is closed.
 func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string) {
 	pool := make(chan net.Conn, streamPoolSize)
 
@@ -63,7 +62,7 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string)
 			select {
 			case pool <- stream:
 			default:
-				stream.Close() // пул переполнился пока открывали
+				stream.Close() // pool full by the time we opened
 			}
 		}()
 	}
@@ -85,9 +84,9 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string)
 			var preOpened net.Conn
 			select {
 			case preOpened = <-pool:
-				refill() // сразу восполняем пул
+				refill() // replenish immediately
 			default:
-				// пул пуст — proxyStream откроет сам
+				// pool empty — proxyStream will open on demand
 			}
 			go proxyStream(mux, conn, preOpened, user, pass)
 		case <-mux.CloseChan():
@@ -96,8 +95,8 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string)
 	}
 }
 
-// proxyStream обрабатывает одно SOCKS5-соединение через yamux-стрим.
-// preOpened — заранее открытый стрим из пула (nil → открываем здесь).
+// proxyStream handles one SOCKS5 connection over a yamux stream.
+// preOpened is a stream taken from the pool (nil → open inline).
 func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pass string) {
 	defer conn.Close()
 
@@ -123,8 +122,8 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pa
 	}
 	defer stream.Close()
 
-	// SOCKS5 success: с пулом стрим уже открыт, отвечаем мгновенно.
-	// Без пула — только после mux.Open(), чтобы upload-тесты не получали 0.
+	// With pool: stream already open, reply immediately.
+	// Without pool: reply only after mux.Open() so upload probes don't get a zero.
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
@@ -140,14 +139,14 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pa
 	log.Printf("[s%d] closed", id)
 }
 
-// ── server: yamux-сервер ──────────────────────────────────────────────────────
+// ── server: yamux server ──────────────────────────────────────────────────────
 
-// serverMuxSession создаёт yamux-сессию поверх WebDAV-пайпа и принимает стримы.
-func serverMuxSession(dav *WebDAV, sid, connectAddr string, proxy *proxyConfig) {
+// serverMuxSession creates a yamux session over a WebDAV pipe and accepts streams.
+func serverMuxSession(dav *WebDAV, sid string, proxy *proxyConfig) {
 	if age := dav.SessionAge(context.Background(), sid); age > staleSessionAge {
 		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
-		// Удаляем init первым — ListSessions перестаёт видеть сессию немедленно,
-		// даже если удаление директории зависнет или провалится.
+		// Delete init first so ListSessions stops seeing the session immediately,
+		// even if the directory removal stalls or fails.
 		dav.Delete(context.Background(), "tunnel/"+sid+"/init")
 		dav.Delete(context.Background(), "tunnel/"+sid)
 		return
@@ -166,35 +165,25 @@ func serverMuxSession(dav *WebDAV, sid, connectAddr string, proxy *proxyConfig) 
 		if err != nil {
 			break
 		}
-		go serverStream(stream, connectAddr, proxy)
+		go serverStream(stream, proxy)
 	}
 
 	muxSess.Close()
 	log.Printf("[%s] mux session closed", sid)
 }
 
-// serverStream обрабатывает один yamux-стрим: читает цель и реле-ит трафик.
-func serverStream(stream net.Conn, connectAddr string, proxy *proxyConfig) {
+// serverStream handles one yamux stream: reads the target and relays traffic.
+func serverStream(stream net.Conn, proxy *proxyConfig) {
 	defer stream.Close()
 
 	id := streamCounter.Add(1)
 
-	var host, port string
-	if connectAddr != "" {
-		var err error
-		host, port, err = net.SplitHostPort(connectAddr)
-		if err != nil {
-			log.Printf("[s%d] invalid connect addr %s: %v", id, connectAddr, err)
-			return
-		}
-	} else {
-		h, p, err := readStreamTarget(stream)
-		if err != nil {
-			return
-		}
-		host = h
-		port = strconv.Itoa(int(p))
+	h, p, err := readStreamTarget(stream)
+	if err != nil {
+		return
 	}
+	host := h
+	port := strconv.Itoa(int(p))
 
 	target := net.JoinHostPort(host, port)
 	log.Printf("[s%d] connecting to %s", id, target)
@@ -202,7 +191,6 @@ func serverStream(stream net.Conn, connectAddr string, proxy *proxyConfig) {
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer dialCancel()
 	var conn net.Conn
-	var err error
 	if proxy != nil {
 		conn, err = dialViaSocks5(dialCtx, proxy, host, port)
 	} else {
@@ -218,9 +206,9 @@ func serverStream(stream net.Conn, connectAddr string, proxy *proxyConfig) {
 	log.Printf("[s%d] closed", id)
 }
 
-// dialTarget резолвит hostname и подключается, ставя IPv4 адреса первыми.
-// Это предотвращает зависание на серверах без IPv6 — подключение к IPv6-адресу
-// может молча висеть до таймаута вместо быстрого "no route to host".
+// dialTarget resolves the hostname and dials, putting IPv4 addresses first.
+// This prevents hangs on servers without IPv6 — a connection to an IPv6 address
+// can silently stall until the timeout instead of failing fast.
 func dialTarget(ctx context.Context, host, port string) (net.Conn, error) {
 	if net.ParseIP(host) != nil {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
@@ -232,7 +220,7 @@ func dialTarget(ctx context.Context, host, port string) (net.Conn, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no addresses for %s", host)
 	}
-	// IPv4 раньше IPv6.
+	// IPv4 before IPv6.
 	sort.Slice(addrs, func(i, j int) bool {
 		return addrs[i].IP.To4() != nil && addrs[j].IP.To4() == nil
 	})
@@ -251,7 +239,7 @@ func dialTarget(ctx context.Context, host, port string) (net.Conn, error) {
 	return nil, lastErr
 }
 
-// ── общее ─────────────────────────────────────────────────────────────────────
+// ── shared ────────────────────────────────────────────────────────────────────
 
 func relayStreams(a, b io.ReadWriteCloser) {
 	var wg sync.WaitGroup
@@ -269,7 +257,7 @@ func relayStreams(a, b io.ReadWriteCloser) {
 	wg.Wait()
 }
 
-// writeStreamTarget записывает [2 host_len][host][2 port] в стрим.
+// writeStreamTarget writes [2 host_len][host][2 port] to the stream.
 func writeStreamTarget(w io.Writer, host string, port uint16) error {
 	hb := []byte(host)
 	buf := make([]byte, 2+len(hb)+2)
@@ -280,7 +268,7 @@ func writeStreamTarget(w io.Writer, host string, port uint16) error {
 	return err
 }
 
-// readStreamTarget читает [2 host_len][host][2 port] из стрима.
+// readStreamTarget reads [2 host_len][host][2 port] from the stream.
 func readStreamTarget(r io.Reader) (string, uint16, error) {
 	var lb [2]byte
 	if _, err := io.ReadFull(r, lb[:]); err != nil {

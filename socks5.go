@@ -11,11 +11,9 @@ import (
 
 const socks5Version = 0x05
 
-// Handshake выполняет SOCKS5-рукопожатие и возвращает целевой host и port.
-// Поддерживает IPv4, IPv6 и доменные имена (SOCKS5h — резолвинг на сервере).
-// После успешного возврата соединение готово к передаче данных.
-// socks5Handshake выполняет SOCKS5-рукопожатие.
-// Если user != "", требует аутентификацию методом username/password (RFC 1929).
+// socks5Handshake performs the SOCKS5 server-side handshake and returns the
+// target host and port. Supports IPv4, IPv6, and domain names (SOCKS5h).
+// If user != "", requires username/password authentication (RFC 1929).
 func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16, err error) {
 	// --- greeting ---
 	hdr := make([]byte, 2)
@@ -31,7 +29,7 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 		return
 	}
 
-	// --- выбор метода ---
+	// --- method selection ---
 	wantAuth := user != ""
 	var selected byte = 0xFF
 	for _, m := range methods {
@@ -90,7 +88,6 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 		return
 	}
 	if req[1] != 0x01 { // CONNECT only
-		// отправляем «command not supported»
 		conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		err = fmt.Errorf("unsupported SOCKS5 command 0x%02x", req[1])
 		return
@@ -105,7 +102,7 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 		}
 		host = net.IP(addr).String()
 
-	case 0x03: // domain (SOCKS5h: резолвинг на удалённой стороне)
+	case 0x03: // domain (SOCKS5h: DNS resolved on the remote side)
 		lenBuf := make([]byte, 1)
 		if _, err = io.ReadFull(conn, lenBuf); err != nil {
 			return
@@ -139,8 +136,8 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 	return
 }
 
-// dialViaSocks5 подключается к targetHost:targetPort через SOCKS5-прокси.
-// DNS-резолвинг происходит на стороне прокси (SOCKS5h).
+// dialViaSocks5 connects to targetHost:targetPort through a SOCKS5 proxy.
+// DNS resolution happens on the proxy side (SOCKS5h).
 func dialViaSocks5(ctx context.Context, proxy *proxyConfig, targetHost, targetPort string) (net.Conn, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxy.addr)
 	if err != nil {
@@ -153,9 +150,9 @@ func dialViaSocks5(ctx context.Context, proxy *proxyConfig, targetHost, targetPo
 	return conn, nil
 }
 
-// socks5Connect выполняет клиентский SOCKS5-хендшейк и команду CONNECT.
+// socks5Connect performs the client-side SOCKS5 handshake and sends a CONNECT command.
 func socks5Connect(conn net.Conn, user, pass, host, port string) error {
-	// greeting — предлагаем no-auth, и user/pass если есть учётные данные
+	// Offer no-auth; also offer username/password if credentials are provided.
 	if user != "" {
 		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
 			return err
@@ -201,7 +198,7 @@ func socks5Connect(conn net.Conn, user, pass, host, port string) error {
 		return fmt.Errorf("SOCKS5: unsupported auth method 0x%02x", resp[1])
 	}
 
-	// CONNECT request — передаём hostname (ATYP=0x03), резолвинг на прокси
+	// CONNECT request — send hostname (ATYP=0x03), DNS resolved on proxy.
 	portNum, _ := strconv.Atoi(port)
 	req := make([]byte, 0, 7+len(host))
 	req = append(req, 0x05, 0x01, 0x00, 0x03, byte(len(host)))
@@ -211,7 +208,7 @@ func socks5Connect(conn net.Conn, user, pass, host, port string) error {
 		return err
 	}
 
-	// ответ: VER REP RSV ATYP
+	// response: VER REP RSV ATYP
 	var rep [4]byte
 	if _, err := io.ReadFull(conn, rep[:]); err != nil {
 		return fmt.Errorf("SOCKS5 CONNECT response: %w", err)
@@ -223,7 +220,7 @@ func socks5Connect(conn net.Conn, user, pass, host, port string) error {
 		return fmt.Errorf("SOCKS5 CONNECT rejected: code 0x%02x", rep[1])
 	}
 
-	// вычитываем bound address (нам не нужен, но обязательно читаем)
+	// Read and discard the bound address (required by the protocol).
 	switch rep[3] {
 	case 0x01:
 		var buf [4]byte
