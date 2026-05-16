@@ -7,13 +7,36 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+type rateLimitError struct {
+	wait time.Duration
+}
+
+func (e *rateLimitError) Error() string {
+	return fmt.Sprintf("rate limited (retry after %v)", e.wait)
+}
+
+func parseRetryAfter(h http.Header) time.Duration {
+	ra := h.Get("Retry-After")
+	if ra == "" {
+		return 5 * time.Second
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(ra); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 5 * time.Second
+}
 
 type WebDAV struct {
 	baseURL  string
@@ -75,11 +98,11 @@ func (w *WebDAV) Put(ctx context.Context, path string, data []byte) error {
 		}
 		return err
 	}
-	if resp.StatusCode == 429 {
-		log.Printf("WebDAV 429 rate limited: PUT %s", path)
-	}
-	io.Copy(io.Discard, resp.Body) // Обязательно вычитываем ответ, чтобы переиспользовать TCP
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 {
+		return &rateLimitError{wait: parseRetryAfter(resp.Header)}
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("PUT %s: %s", path, resp.Status)
 	}
@@ -102,12 +125,13 @@ func (w *WebDAV) Get(ctx context.Context, path string) ([]byte, int, error) {
 		}
 		return nil, 0, err
 	}
-	if resp.StatusCode == 429 {
-		log.Printf("WebDAV 429 rate limited: GET %s", path)
-	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 429 {
+		io.Copy(io.Discard, resp.Body)
+		return nil, 429, &rateLimitError{wait: parseRetryAfter(resp.Header)}
+	}
 	if resp.StatusCode >= 400 {
-		io.Copy(io.Discard, resp.Body) // Спасаем пул соединений
+		io.Copy(io.Discard, resp.Body)
 		if resp.StatusCode == 404 {
 			return nil, 404, nil
 		}
@@ -127,11 +151,11 @@ func (w *WebDAV) Delete(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == 429 {
-		log.Printf("WebDAV 429 rate limited: DELETE %s", path)
-	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 {
+		return &rateLimitError{wait: parseRetryAfter(resp.Header)}
+	}
 	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
 		return fmt.Errorf("DELETE %s: %s", path, resp.Status)
 	}
@@ -148,11 +172,11 @@ func (w *WebDAV) Mkcol(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == 429 {
-		log.Printf("WebDAV 429 rate limited: MKCOL %s", path)
-	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode == 429 {
+		return &rateLimitError{wait: parseRetryAfter(resp.Header)}
+	}
 	// 405 = already exists, 409 = parent missing (treat as ok, Mkcol is best-effort)
 	if resp.StatusCode >= 400 && resp.StatusCode != 405 && resp.StatusCode != 409 {
 		return fmt.Errorf("MKCOL %s: %s", path, resp.Status)
@@ -160,7 +184,7 @@ func (w *WebDAV) Mkcol(ctx context.Context, path string) error {
 	return nil
 }
 
-func (w *WebDAV) Propfind(ctx context.Context, path string) ([]string, error) {
+func (w *WebDAV) Propfind(ctx context.Context, path string, depth string) ([]string, error) {
 	// Для директорий добавляем слеш на конце.
 	// Иначе Apache вернёт 301 редирект, который Go пройдёт обычным GET-запросом и получит HTML страницу автоиндекса.
 	if !strings.HasSuffix(path, "/") {
@@ -172,7 +196,7 @@ func (w *WebDAV) Propfind(ctx context.Context, path string) ([]string, error) {
 		return nil, err
 	}
 	req.SetBasicAuth(w.login, w.password)
-	req.Header.Set("Depth", "1")
+	req.Header.Set("Depth", depth)
 	req.Header.Set("Content-Type", "application/xml")
 	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	req.Header.Set("Pragma", "no-cache")
@@ -181,7 +205,8 @@ func (w *WebDAV) Propfind(ctx context.Context, path string) ([]string, error) {
 		return nil, err
 	}
 	if resp.StatusCode == 429 {
-		log.Printf("WebDAV 429 rate limited: PROPFIND %s", path)
+		io.Copy(io.Discard, resp.Body)
+		return nil, &rateLimitError{wait: parseRetryAfter(resp.Header)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -226,19 +251,35 @@ func (w *WebDAV) SessionAge(ctx context.Context, sid string) time.Duration {
 // Возвращает только сессии, у которых есть файл init —
 // это означает что клиент завершил Init() и все поддиректории уже созданы.
 func (w *WebDAV) ListSessions(ctx context.Context) ([]string, error) {
-	hrefs, err := w.Propfind(ctx, "tunnel")
+	hrefs, err := w.Propfind(ctx, "tunnel", "1")
 	if err != nil || hrefs == nil {
 		return nil, err
 	}
-	var sessions []string
+	var candidates []string
 	for _, href := range hrefs {
-		id := lastPathSegment(href)
-		if id == "" || id == "tunnel" {
-			continue
+		if id := lastPathSegment(href); id != "" && id != "tunnel" {
+			candidates = append(candidates, id)
 		}
-		_, status, _ := w.Get(ctx, "tunnel/"+id+"/init")
-		if status == 200 {
-			sessions = append(sessions, id)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	// Проверяем init-файлы параллельно.
+	type result struct {
+		id string
+		ok bool
+	}
+	ch := make(chan result, len(candidates))
+	for _, id := range candidates {
+		go func(sid string) {
+			_, status, _ := w.Get(ctx, "tunnel/"+sid+"/init")
+			ch <- result{sid, status == 200}
+		}(id)
+	}
+	var sessions []string
+	for range candidates {
+		if r := <-ch; r.ok {
+			sessions = append(sessions, r.id)
 		}
 	}
 	return sessions, nil

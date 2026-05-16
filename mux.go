@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -17,8 +19,6 @@ import (
 const (
 	// --- НАСТРОЙКИ YAMUX ---
 	// Формула: window = RTT × желаемый_throughput
-	// Измеренные RTT на Beeline WebDAV: c2s ~1.9s, s2c ~2.9s
-	// При 4 МБ окне: upload ~2 MB/s на стрим, download ~1.4 MB/s на стрим
 	muxWindowSize = 24 * 1024 * 1024 // 4 МБ
 )
 
@@ -66,9 +66,6 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
 	}
 
 	for {
-		if mux.IsClosed() {
-			return
-		}
 		select {
 		case conn, ok := <-connCh:
 			if !ok {
@@ -86,7 +83,8 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
 				// пул пуст — proxyStream откроет сам
 			}
 			go proxyStream(mux, conn, preOpened)
-		case <-time.After(200 * time.Millisecond):
+		case <-mux.CloseChan():
+			return
 		}
 	}
 }
@@ -174,19 +172,29 @@ func serverStream(stream net.Conn, connectAddr string) {
 
 	id := streamCounter.Add(1)
 
-	var target string
+	var host, port string
 	if connectAddr != "" {
-		target = connectAddr
+		var err error
+		host, port, err = net.SplitHostPort(connectAddr)
+		if err != nil {
+			log.Printf("[s%d] invalid connect addr %s: %v", id, connectAddr, err)
+			return
+		}
 	} else {
-		host, port, err := readStreamTarget(stream)
+		h, p, err := readStreamTarget(stream)
 		if err != nil {
 			return
 		}
-		target = net.JoinHostPort(host, strconv.Itoa(int(port)))
+		host = h
+		port = strconv.Itoa(int(p))
 	}
 
+	target := net.JoinHostPort(host, port)
 	log.Printf("[s%d] connecting to %s", id, target)
-	conn, err := net.DialTimeout("tcp", target, 15*time.Second)
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer dialCancel()
+	conn, err := dialTarget(dialCtx, host, port)
 	if err != nil {
 		log.Printf("[s%d] dial %s failed: %v", id, target, err)
 		return
@@ -195,6 +203,39 @@ func serverStream(stream net.Conn, connectAddr string) {
 
 	relayStreams(stream, conn)
 	log.Printf("[s%d] closed", id)
+}
+
+// dialTarget резолвит hostname и подключается, ставя IPv4 адреса первыми.
+// Это предотвращает зависание на серверах без IPv6 — подключение к IPv6-адресу
+// может молча висеть до таймаута вместо быстрого "no route to host".
+func dialTarget(ctx context.Context, host, port string) (net.Conn, error) {
+	if net.ParseIP(host) != nil {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("lookup %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", host)
+	}
+	// IPv4 раньше IPv6.
+	sort.Slice(addrs, func(i, j int) bool {
+		return addrs[i].IP.To4() != nil && addrs[j].IP.To4() == nil
+	})
+	dialer := &net.Dialer{}
+	var lastErr error
+	for _, a := range addrs {
+		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(a.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, lastErr
 }
 
 // ── общее ─────────────────────────────────────────────────────────────────────

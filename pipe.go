@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,15 +16,19 @@ import (
 
 const (
 	// --- НАСТРОЙКИ ДЛЯ ПУБЛИЧНЫХ ОБЛАКОВ (Яндекс, Mail.ru и др. с лимитами) ---
-	pollInterval       = 500 * time.Millisecond // Реже опрашиваем 404, чтобы не злить анти-бот
+	pollInterval       = 500 * time.Millisecond // Верхний предел паузы между опросами (при простое)
+	minPollInterval    = 50 * time.Millisecond  // Начальная пауза при адаптивном backoff
+	coalesceDelay      = 10 * time.Millisecond  // Окно склейки мелких записей в writer'е
 	chunkDataSize      = 128*1024 - 1           // Оптимальный размер чанка, чтобы не ловить таймауты
 	maxConcurrentPuts  = 8                      // Лимит параллельных отправок
 	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
 	maxReadAheadWindow = 8                      // maximum concurrent GETs under load (raise to improve upload throughput)
 
 	// --- НАСТРОЙКИ ДЛЯ СВОЕГО VPS (Apache/rclone без лимитов) ---
-	// pollInterval      = 100 * time.Millisecond
-	// chunkDataSize     = 1024*1024 - 1
+	// pollInterval    = 100 * time.Millisecond
+	// minPollInterval = 10 * time.Millisecond
+	// coalesceDelay   = 5 * time.Millisecond
+	// chunkDataSize   = 1024*1024 - 1
 	// maxConcurrentPuts = 16
 	// readAheadWindow   = 10
 
@@ -100,9 +105,26 @@ func (p *Pipe) chunkPath(dir string, seq int64) string {
 // Init создаёт директории и файл init (маркер готовности).
 func (p *Pipe) Init() error {
 	base := fmt.Sprintf("tunnel/%s", p.sessionID)
-	for _, path := range []string{"tunnel", base, base + "/" + p.writeDir, base + "/" + p.readDir} {
+	for _, path := range []string{"tunnel", base} {
 		if err := p.dav.Mkcol(p.ctx, path); err != nil {
 			return fmt.Errorf("mkcol %s: %w", path, err)
+		}
+	}
+	// Поддиректории независимы — создаём параллельно.
+	type mkcolResult struct {
+		path string
+		err  error
+	}
+	ch := make(chan mkcolResult, 2)
+	for _, sub := range []string{p.writeDir, p.readDir} {
+		go func() {
+			path := base + "/" + sub
+			ch <- mkcolResult{path, p.dav.Mkcol(p.ctx, path)}
+		}()
+	}
+	for range 2 {
+		if r := <-ch; r.err != nil {
+			return fmt.Errorf("mkcol %s: %w", r.path, r.err)
 		}
 	}
 	return p.dav.Put(p.ctx, base+"/init", []byte("ok"))
@@ -181,15 +203,20 @@ func (p *Pipe) WatchDone() {
 			default:
 			}
 
-			_, status, _ := p.dav.Get(p.ctx, fmt.Sprintf("tunnel/%s/done", p.sessionID))
+			_, status, err := p.dav.Get(p.ctx, fmt.Sprintf("tunnel/%s/done", p.sessionID))
 			if status == 200 {
 				log.Printf("[%s] remote signaled done", p.sessionID)
 				p.doneOnce.Do(func() { close(p.doneCh) })
 				return
 			}
 
+			wait := doneCheckInterval
+			var rlErr *rateLimitError
+			if errors.As(err, &rlErr) {
+				wait = rlErr.wait
+			}
 			select {
-			case <-time.After(doneCheckInterval):
+			case <-time.After(wait):
 			case <-p.ctx.Done():
 				return
 			}
@@ -204,7 +231,7 @@ func (p *Pipe) start() {
 
 func (p *Pipe) startWriter() {
 	var buf []byte
-	timer := time.NewTimer(25 * time.Millisecond)
+	timer := time.NewTimer(coalesceDelay)
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -262,6 +289,16 @@ func (p *Pipe) startWriter() {
 					if p.ctx.Err() != nil {
 						return
 					}
+					var rlErr *rateLimitError
+					if errors.As(err, &rlErr) {
+						log.Printf("[%s] PUT seq=%d rate limited, waiting %v", p.sessionID, s, rlErr.wait)
+						select {
+						case <-time.After(rlErr.wait):
+						case <-p.ctx.Done():
+							return
+						}
+						continue
+					}
 					attempts++
 					log.Printf("[%s] PUT seq=%d attempt=%d: %v", p.sessionID, s, attempts, err)
 					if attempts >= 15 {
@@ -309,7 +346,7 @@ func (p *Pipe) startWriter() {
 				flush(false, false)
 			}
 			if len(buf) > 0 && !timerActive {
-				timer.Reset(25 * time.Millisecond)
+				timer.Reset(coalesceDelay)
 				timerActive = true
 			} else if len(buf) == 0 && timerActive {
 				if !timer.Stop() {
@@ -349,21 +386,41 @@ func (p *Pipe) startReader() {
 		go func() {
 			path := p.chunkPath(p.readDir, seq)
 			polled := false
+			backoff := minPollInterval
 			for {
 				if p.ctx.Err() != nil {
 					return
 				}
 				chunk, status, err := p.dav.Get(p.ctx, path)
-				if err != nil || status == 404 || len(chunk) == 0 {
+				var rlErr *rateLimitError
+				if errors.As(err, &rlErr) {
 					polled = true
 					select {
-					case <-time.After(pollInterval):
+					case <-time.After(rlErr.wait):
 						continue
 					case <-p.ctx.Done():
 						return
 					}
 				}
-				go p.dav.Delete(context.Background(), path)
+				if err != nil || status == 404 || len(chunk) == 0 {
+					polled = true
+					wait := backoff
+					backoff *= 2
+					if backoff > pollInterval {
+						backoff = pollInterval
+					}
+					select {
+					case <-time.After(wait):
+						continue
+					case <-p.ctx.Done():
+						return
+					}
+				}
+				go func(chunkPath string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					p.dav.Delete(ctx, chunkPath)
+				}(path)
 				select {
 				case fetchDone <- fetchResult{seq, chunk, polled}:
 				case <-p.ctx.Done():

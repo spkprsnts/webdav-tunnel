@@ -125,8 +125,26 @@ func runServer(dav *WebDAV, overrideTarget string) {
 	}
 	go startupCleanup(dav)
 
-	known := make(map[string]struct{})
+	type sessionEntry struct {
+		closedAt time.Time
+	}
+	known := make(map[string]*sessionEntry)
 	var mu sync.Mutex
+
+	// Периодически очищаем завершённые сессии (не раньше 5 мин после закрытия,
+	// чтобы не переобработать сессию при медленном удалении файлов на WebDAV).
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			mu.Lock()
+			for id, e := range known {
+				if !e.closedAt.IsZero() && time.Since(e.closedAt) > 5*time.Minute {
+					delete(known, id)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
 
 	for {
 		sessions, err := dav.ListSessions(context.Background())
@@ -139,7 +157,7 @@ func runServer(dav *WebDAV, overrideTarget string) {
 			mu.Lock()
 			_, seen := known[sid]
 			if !seen {
-				known[sid] = struct{}{}
+				known[sid] = &sessionEntry{}
 			}
 			mu.Unlock()
 			if seen {
@@ -147,8 +165,11 @@ func runServer(dav *WebDAV, overrideTarget string) {
 			}
 			go func(id string) {
 				serverMuxSession(dav, id, overrideTarget)
-				// Намеренно не удаляем из known: сессия завершена и не вернётся.
-				// Удаление приводило к повторной обработке при медленном удалении на WebDAV.
+				mu.Lock()
+				if e, ok := known[id]; ok {
+					e.closedAt = time.Now()
+				}
+				mu.Unlock()
 			}(sid)
 		}
 		time.Sleep(3 * time.Second)
@@ -159,7 +180,7 @@ func runServer(dav *WebDAV, overrideTarget string) {
 
 func startupCleanup(dav *WebDAV) {
 	ctx := context.Background()
-	hrefs, err := dav.Propfind(ctx, "tunnel")
+	hrefs, err := dav.Propfind(ctx, "tunnel", "1")
 	if err != nil || len(hrefs) == 0 {
 		return
 	}
