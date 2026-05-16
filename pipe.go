@@ -15,22 +15,13 @@ import (
 )
 
 const (
-	// --- НАСТРОЙКИ ДЛЯ ПУБЛИЧНЫХ ОБЛАКОВ (Яндекс, Mail.ru и др. с лимитами) ---
 	pollInterval       = 500 * time.Millisecond // Верхний предел паузы между опросами (при простое)
-	minPollInterval    = 50 * time.Millisecond  // Начальная пауза при адаптивном backoff
+	minPollInterval    = 200 * time.Millisecond // Начальная пауза при адаптивном backoff (50ms для VPS)
 	coalesceDelay      = 10 * time.Millisecond  // Окно склейки мелких записей в writer'е
 	chunkDataSize      = 128*1024 - 1           // Оптимальный размер чанка, чтобы не ловить таймауты
 	maxConcurrentPuts  = 8                      // Лимит параллельных отправок
 	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
 	maxReadAheadWindow = 8                      // maximum concurrent GETs under load (raise to improve upload throughput)
-
-	// --- НАСТРОЙКИ ДЛЯ СВОЕГО VPS (Apache/rclone без лимитов) ---
-	// pollInterval    = 100 * time.Millisecond
-	// minPollInterval = 10 * time.Millisecond
-	// coalesceDelay   = 5 * time.Millisecond
-	// chunkDataSize   = 1024*1024 - 1
-	// maxConcurrentPuts = 16
-	// readAheadWindow   = 10
 
 	// --- ОБЩИЕ ТАЙМАУТЫ ---
 	idleTimeout = 90 * time.Second
