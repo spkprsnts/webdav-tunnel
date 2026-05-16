@@ -12,9 +12,10 @@ import (
 const socks5Version = 0x05
 
 // socks5Handshake performs the SOCKS5 server-side handshake and returns the
-// target host and port. Supports IPv4, IPv6, and domain names (SOCKS5h).
+// command byte (0x01 CONNECT, 0x03 UDP ASSOCIATE), target host, and port.
+// Supports IPv4, IPv6, and domain names (SOCKS5h).
 // If user != "", requires username/password authentication (RFC 1929).
-func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16, err error) {
+func socks5Handshake(conn net.Conn, user, pass string) (cmd byte, host string, port uint16, err error) {
 	// --- greeting ---
 	hdr := make([]byte, 2)
 	if _, err = io.ReadFull(conn, hdr); err != nil {
@@ -87,9 +88,10 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 		err = fmt.Errorf("bad SOCKS5 request version")
 		return
 	}
-	if req[1] != 0x01 { // CONNECT only
+	cmd = req[1]
+	if cmd != 0x01 && cmd != 0x03 { // CONNECT or UDP ASSOCIATE
 		conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		err = fmt.Errorf("unsupported SOCKS5 command 0x%02x", req[1])
+		err = fmt.Errorf("unsupported SOCKS5 command 0x%02x", cmd)
 		return
 	}
 

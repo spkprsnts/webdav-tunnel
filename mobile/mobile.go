@@ -95,3 +95,4 @@ func SetReadAheadMin(n int) { tunnel.MinReadAheadWindow = n }
 
 // SetReadAheadMax sets the maximum concurrent prefetch GETs (default 8).
 func SetReadAheadMax(n int) { tunnel.MaxReadAheadWindow = n }
+

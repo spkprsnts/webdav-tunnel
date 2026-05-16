@@ -113,7 +113,7 @@ webdav-tunnel -mode client ... \
 
 ## Android library (gomobile)
 
-The `mobile/` package exposes the client as a gomobile AAR for use in Android apps.
+The `mobile/` package exposes the client as a gomobile AAR.
 
 ### Build
 
@@ -123,7 +123,7 @@ gomobile init
 gomobile bind -target android -o webdav-tunnel.aar webdav-tunnel/mobile
 ```
 
-### Java / Kotlin usage
+### Usage (Java / Kotlin)
 
 ```kotlin
 import mobile.Mobile
@@ -135,14 +135,22 @@ Mobile.setChunkSize(1048575)
 // start the SOCKS5 proxy on localhost:1080
 Mobile.start("https://dav.example.com", "user", "pass", "127.0.0.1:1080", "", "")
 
-// check status
+// check status / stop
 val running = Mobile.isRunning()
-
-// stop
 Mobile.stop()
 ```
 
 Configure OkHttp or the system proxy to use `127.0.0.1:1080` as a SOCKS5 proxy.
+
+### DNS support
+
+The SOCKS5 server supports the **UDP ASSOCIATE** command (RFC 1928 §7). When a
+client issues UDP ASSOCIATE, the proxy creates a local UDP relay and forwards
+DNS queries (port 53) through the WebDAV tunnel as DNS-over-TCP (RFC 1035).
+Other UDP traffic is dropped.
+
+This lets SOCKS5-aware DNS clients (e.g. a custom resolver configured to use
+the proxy) resolve names through the tunnel without any additional setup.
 
 ## Notes
 

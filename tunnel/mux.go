@@ -93,7 +93,7 @@ func proxyMuxLoop(ctx context.Context, mux *yamux.Session, connCh <-chan net.Con
 			default:
 				// pool empty — proxyStream will open on demand
 			}
-			go proxyStream(mux, conn, preOpened, user, pass)
+			go proxyStream(ctx, mux, conn, preOpened, user, pass)
 		case <-mux.CloseChan():
 			return
 		case <-ctx.Done():
@@ -104,10 +104,10 @@ func proxyMuxLoop(ctx context.Context, mux *yamux.Session, connCh <-chan net.Con
 
 // proxyStream handles one SOCKS5 connection over a yamux stream.
 // preOpened is a stream taken from the pool (nil → open inline).
-func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pass string) {
+func proxyStream(ctx context.Context, mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pass string) {
 	defer conn.Close()
 
-	host, port, err := socks5Handshake(conn, user, pass)
+	cmd, host, port, err := socks5Handshake(conn, user, pass)
 	if err != nil {
 		if preOpened != nil {
 			preOpened.Close()
@@ -115,6 +115,15 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pa
 		return
 	}
 
+	if cmd == 0x03 { // UDP ASSOCIATE — DNS relay over TCP tunnel
+		if preOpened != nil {
+			preOpened.Close()
+		}
+		handleUDPAssociate(ctx, conn, mux)
+		return
+	}
+
+	// CONNECT
 	var stream net.Conn
 	if preOpened != nil {
 		stream = preOpened
@@ -144,6 +153,161 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pa
 
 	relayStreams(conn, stream)
 	log.Printf("[s%d] closed", id)
+}
+
+// handleUDPAssociate implements SOCKS5 UDP ASSOCIATE (RFC 1928 §7).
+// Only DNS (port 53) datagrams are forwarded — each query is converted to
+// DNS-over-TCP (RFC 1035) and sent through the yamux tunnel.
+// The TCP control connection (conn) must stay alive while the relay runs;
+// closing it (or cancelling ctx) tears down the UDP socket.
+func handleUDPAssociate(ctx context.Context, conn net.Conn, mux *yamux.Session) {
+	// Bind UDP relay on the same interface as the SOCKS5 listener.
+	localIP := conn.LocalAddr().(*net.TCPAddr).IP
+	if localIP.IsUnspecified() {
+		localIP = net.IPv4(127, 0, 0, 1)
+	}
+	pc, err := net.ListenPacket("udp", net.JoinHostPort(localIP.String(), "0"))
+	if err != nil {
+		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer pc.Close()
+
+	udpPort := pc.LocalAddr().(*net.UDPAddr).Port
+	var resp []byte
+	if ip4 := localIP.To4(); ip4 != nil {
+		resp = []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+		copy(resp[4:8], ip4)
+		binary.BigEndian.PutUint16(resp[8:10], uint16(udpPort))
+	} else {
+		resp = make([]byte, 22)
+		resp[0], resp[1], resp[2], resp[3] = 0x05, 0x00, 0x00, 0x04
+		copy(resp[4:20], localIP.To16())
+		binary.BigEndian.PutUint16(resp[20:22], uint16(udpPort))
+	}
+	if _, err := conn.Write(resp); err != nil {
+		return
+	}
+
+	// Close the UDP socket when the TCP control connection closes or ctx is done.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(io.Discard, conn)
+	}()
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+		pc.Close()
+	}()
+
+	buf := make([]byte, 65536)
+	for {
+		n, src, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		pkt := buf[:n]
+		// SOCKS5 UDP header: [2 RSV][1 FRAG][1 ATYP][DST.ADDR][2 DST.PORT][DATA]
+		if len(pkt) < 4 || pkt[2] != 0 { // drop fragmented or malformed
+			continue
+		}
+		var dstHost string
+		var dstPort uint16
+		var dataOff int
+		switch pkt[3] {
+		case 0x01: // IPv4
+			if len(pkt) < 10 {
+				continue
+			}
+			dstHost = net.IP(pkt[4:8]).String()
+			dstPort = binary.BigEndian.Uint16(pkt[8:10])
+			dataOff = 10
+		case 0x03: // domain
+			if len(pkt) < 5 {
+				continue
+			}
+			dl := int(pkt[4])
+			if len(pkt) < 5+dl+2 {
+				continue
+			}
+			dstHost = string(pkt[5 : 5+dl])
+			dstPort = binary.BigEndian.Uint16(pkt[5+dl : 5+dl+2])
+			dataOff = 5 + dl + 2
+		case 0x04: // IPv6
+			if len(pkt) < 22 {
+				continue
+			}
+			dstHost = net.IP(pkt[4:20]).String()
+			dstPort = binary.BigEndian.Uint16(pkt[20:22])
+			dataOff = 22
+		default:
+			continue
+		}
+		if dstPort != 53 {
+			continue // only DNS is forwarded; other UDP is dropped
+		}
+		query := make([]byte, n-dataOff)
+		copy(query, pkt[dataOff:])
+		go relayDNS(pc, src, mux, dstHost, dstPort, query)
+	}
+}
+
+// relayDNS converts one UDP DNS query to DNS-over-TCP (RFC 1035 §4.2.2),
+// tunnels it through a new yamux stream, and returns the UDP response.
+func relayDNS(pc net.PacketConn, clientAddr net.Addr, mux *yamux.Session, host string, port uint16, query []byte) {
+	stream, err := mux.Open()
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+
+	if err := writeStreamTarget(stream, host, port); err != nil {
+		return
+	}
+
+	tcpQ := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(tcpQ[:2], uint16(len(query)))
+	copy(tcpQ[2:], query)
+
+	stream.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := stream.Write(tcpQ); err != nil {
+		return
+	}
+
+	var lb [2]byte
+	if _, err := io.ReadFull(stream, lb[:]); err != nil {
+		return
+	}
+	ans := make([]byte, binary.BigEndian.Uint16(lb[:]))
+	if _, err := io.ReadFull(stream, ans); err != nil {
+		return
+	}
+
+	// Build SOCKS5 UDP response header with the DNS server as source address.
+	var hdr []byte
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			hdr = []byte{0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0}
+			copy(hdr[4:8], ip4)
+			binary.BigEndian.PutUint16(hdr[8:10], port)
+		} else {
+			hdr = make([]byte, 22)
+			hdr[3] = 0x04
+			copy(hdr[4:20], ip.To16())
+			binary.BigEndian.PutUint16(hdr[20:22], port)
+		}
+	} else {
+		hdr = make([]byte, 4+1+len(host)+2)
+		hdr[3] = 0x03
+		hdr[4] = byte(len(host))
+		copy(hdr[5:], host)
+		binary.BigEndian.PutUint16(hdr[4+1+len(host):], port)
+	}
+
+	pc.WriteTo(append(hdr, ans...), clientAddr)
 }
 
 // ── server: yamux server ──────────────────────────────────────────────────────
