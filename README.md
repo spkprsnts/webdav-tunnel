@@ -2,6 +2,8 @@
 
 A TCP tunnel that uses any WebDAV server as a transport layer. Traffic is serialized into files uploaded and downloaded via WebDAV, allowing tunneling through environments where only HTTPS to cloud storage is permitted.
 
+> **Disclaimer:** This project is provided for educational and research purposes only. Use it only on networks and systems you own or have explicit permission to access. The authors are not responsible for any misuse.
+
 ## How it works
 
 ```
