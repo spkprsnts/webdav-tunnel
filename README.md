@@ -111,6 +111,39 @@ webdav-tunnel -mode client ... \
   -chunk-size 1048575 -puts 16 -read-max 16
 ```
 
+## Android library (gomobile)
+
+The `mobile/` package exposes the client as a gomobile AAR for use in Android apps.
+
+### Build
+
+```sh
+go install golang.org/x/mobile/cmd/gomobile@latest
+gomobile init
+gomobile bind -target android -o webdav-tunnel.aar webdav-tunnel/mobile
+```
+
+### Java / Kotlin usage
+
+```kotlin
+import mobile.Mobile
+
+// optional tuning (call before Start)
+Mobile.setPollMinMs(50)
+Mobile.setChunkSize(1048575)
+
+// start the SOCKS5 proxy on localhost:1080
+Mobile.start("https://dav.example.com", "user", "pass", "127.0.0.1:1080", "", "")
+
+// check status
+val running = Mobile.isRunning()
+
+// stop
+Mobile.stop()
+```
+
+Configure OkHttp or the system proxy to use `127.0.0.1:1080` as a SOCKS5 proxy.
+
 ## Notes
 
 - The tunnel uses **HTTP/1.1 only** (HTTP/2 is disabled). Some cloud providers throttle or fingerprint HTTP/2 bot traffic differently.

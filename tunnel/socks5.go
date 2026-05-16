@@ -1,4 +1,4 @@
-package main
+package tunnel
 
 import (
 	"context"
@@ -138,7 +138,7 @@ func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16
 
 // dialViaSocks5 connects to targetHost:targetPort through a SOCKS5 proxy.
 // DNS resolution happens on the proxy side (SOCKS5h).
-func dialViaSocks5(ctx context.Context, proxy *proxyConfig, targetHost, targetPort string) (net.Conn, error) {
+func dialViaSocks5(ctx context.Context, proxy *ProxyConfig, targetHost, targetPort string) (net.Conn, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxy.addr)
 	if err != nil {
 		return nil, fmt.Errorf("connect to SOCKS5 proxy %s: %w", proxy.addr, err)

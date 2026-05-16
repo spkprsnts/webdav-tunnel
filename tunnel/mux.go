@@ -1,4 +1,4 @@
-package main
+package tunnel
 
 import (
 	"context"
@@ -19,13 +19,20 @@ import (
 const (
 	// window = RTT × desired_throughput
 	muxWindowSize = 24 * 1024 * 1024
+
+	streamPoolSize = 16
 )
 
-// proxyConfig holds upstream SOCKS5 proxy settings for outbound server connections.
-type proxyConfig struct {
+// ProxyConfig holds upstream SOCKS5 proxy settings for outbound server connections.
+type ProxyConfig struct {
 	addr string // host:port
 	user string
 	pass string
+}
+
+// NewProxyConfig creates a ProxyConfig from parsed components.
+func NewProxyConfig(addr, user, pass string) *ProxyConfig {
+	return &ProxyConfig{addr: addr, user: user, pass: pass}
 }
 
 var streamCounter atomic.Int64
@@ -41,13 +48,11 @@ func yamuxConfig() *yamux.Config {
 
 // ── proxy: yamux client ───────────────────────────────────────────────────────
 
-const streamPoolSize = 16
-
 // proxyMuxLoop accepts SOCKS5 connections from connCh and opens yamux streams.
 // It maintains a pool of pre-opened streams to eliminate the SYN/ACK latency
 // (~5 s on slow WebDAV) from the connection setup hot path.
-// Returns when the mux session is closed.
-func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string) {
+// Returns when the mux session is closed or ctx is cancelled.
+func proxyMuxLoop(ctx context.Context, mux *yamux.Session, connCh <-chan net.Conn, user, pass string) {
 	pool := make(chan net.Conn, streamPoolSize)
 
 	refill := func() {
@@ -90,6 +95,8 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string)
 			}
 			go proxyStream(mux, conn, preOpened, user, pass)
 		case <-mux.CloseChan():
+			return
+		case <-ctx.Done():
 			return
 		}
 	}
@@ -142,8 +149,8 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pa
 // ── server: yamux server ──────────────────────────────────────────────────────
 
 // serverMuxSession creates a yamux session over a WebDAV pipe and accepts streams.
-func serverMuxSession(dav *WebDAV, sid string, proxy *proxyConfig) {
-	if age := dav.SessionAge(context.Background(), sid); age > staleSessionAge {
+func serverMuxSession(dav *WebDAV, sid string, proxy *ProxyConfig) {
+	if age := dav.SessionAge(context.Background(), sid); age > StaleSessionAge {
 		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
 		// Delete init first so ListSessions stops seeing the session immediately,
 		// even if the directory removal stalls or fails.
@@ -173,7 +180,7 @@ func serverMuxSession(dav *WebDAV, sid string, proxy *proxyConfig) {
 }
 
 // serverStream handles one yamux stream: reads the target and relays traffic.
-func serverStream(stream net.Conn, proxy *proxyConfig) {
+func serverStream(stream net.Conn, proxy *ProxyConfig) {
 	defer stream.Close()
 
 	id := streamCounter.Add(1)

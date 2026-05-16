@@ -1,4 +1,4 @@
-package main
+package tunnel
 
 import (
 	"context"
@@ -15,20 +15,20 @@ import (
 )
 
 var (
-	pollInterval       = 500 * time.Millisecond // maximum poll backoff when idle
-	minPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff
-	coalesceDelay      = 10 * time.Millisecond  // write coalescing window
-	chunkDataSize      = 128*1024 - 1           // chunk size chosen to avoid cloud timeouts
-	maxConcurrentPuts  = 8                      // parallel upload limit
-	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
-	maxReadAheadWindow = 8                      // maximum concurrent GETs under load
+	PollInterval       = 500 * time.Millisecond // maximum poll backoff when idle
+	MinPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff
+	CoalesceDelay      = 10 * time.Millisecond  // write coalescing window
+	ChunkDataSize      = 128*1024 - 1           // chunk size chosen to avoid cloud timeouts
+	MaxConcurrentPuts  = 8                      // parallel upload limit
+	MinReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
+	MaxReadAheadWindow = 8                      // maximum concurrent GETs under load
 )
 
 const (
 	idleTimeout = 90 * time.Second
 
 	heartbeatInterval = 30 * time.Second
-	staleSessionAge   = 90 * time.Second
+	StaleSessionAge   = 90 * time.Second
 	doneCheckInterval = 3 * time.Second
 )
 
@@ -79,7 +79,7 @@ func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string) *Pipe {
 		doneCh:    make(chan struct{}),
 		writeCh:   make(chan []byte, 128),
 		readCh:    make(chan []byte, 128),
-		putSem:    make(chan struct{}, maxConcurrentPuts),
+		putSem:    make(chan struct{}, MaxConcurrentPuts),
 	}
 	// When doneCh closes, cancel the context immediately to abort stalled HTTP requests.
 	go func() {
@@ -134,7 +134,7 @@ func (p *Pipe) ReadTarget() (host string, port uint16, err error) {
 		data, status, gerr := p.dav.Get(p.ctx, fmt.Sprintf("tunnel/%s/target", p.sessionID))
 		if gerr != nil || status == 404 {
 			select {
-			case <-time.After(pollInterval):
+			case <-time.After(PollInterval):
 			case <-p.ctx.Done():
 				return "", 0, p.ctx.Err()
 			}
@@ -222,7 +222,7 @@ func (p *Pipe) start() {
 
 func (p *Pipe) startWriter() {
 	var buf []byte
-	timer := time.NewTimer(coalesceDelay)
+	timer := time.NewTimer(CoalesceDelay)
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -236,12 +236,12 @@ func (p *Pipe) startWriter() {
 			return
 		}
 		for len(buf) > 0 || isEOF {
-			if !isEOF && !force && len(buf) < chunkDataSize {
+			if !isEOF && !force && len(buf) < ChunkDataSize {
 				break
 			}
 			n := len(buf)
-			if n > chunkDataSize {
-				n = chunkDataSize
+			if n > ChunkDataSize {
+				n = ChunkDataSize
 			}
 			var data []byte
 			if n > 0 {
@@ -333,11 +333,11 @@ func (p *Pipe) startWriter() {
 				return
 			}
 			buf = append(buf, data...)
-			if len(buf) >= chunkDataSize {
+			if len(buf) >= ChunkDataSize {
 				flush(false, false)
 			}
 			if len(buf) > 0 && !timerActive {
-				timer.Reset(coalesceDelay)
+				timer.Reset(CoalesceDelay)
 				timerActive = true
 			} else if len(buf) == 0 && timerActive {
 				if !timer.Stop() {
@@ -361,13 +361,13 @@ func (p *Pipe) startReader() {
 		data   []byte
 		polled bool
 	}
-	fetchDone := make(chan fetchResult, maxReadAheadWindow+4)
+	fetchDone := make(chan fetchResult, MaxReadAheadWindow+4)
 
 	var (
 		nextSeq   int64 = 1
 		nextFetch int64 = 1
 		inFlight  int
-		window    = minReadAheadWindow
+		window    = MinReadAheadWindow
 	)
 
 	launch := func() {
@@ -377,7 +377,7 @@ func (p *Pipe) startReader() {
 		go func() {
 			path := p.chunkPath(p.readDir, seq)
 			polled := false
-			backoff := minPollInterval
+			backoff := MinPollInterval
 			for {
 				if p.ctx.Err() != nil {
 					return
@@ -397,8 +397,8 @@ func (p *Pipe) startReader() {
 					polled = true
 					wait := backoff
 					backoff *= 2
-					if backoff > pollInterval {
-						backoff = pollInterval
+					if backoff > PollInterval {
+						backoff = PollInterval
 					}
 					select {
 					case <-time.After(wait):
@@ -437,11 +437,11 @@ func (p *Pipe) startReader() {
 		case res := <-fetchDone:
 			inFlight--
 			if !res.polled {
-				if window < maxReadAheadWindow {
+				if window < MaxReadAheadWindow {
 					window++
 				}
 			} else {
-				if window > minReadAheadWindow {
+				if window > MinReadAheadWindow {
 					window--
 				}
 			}
