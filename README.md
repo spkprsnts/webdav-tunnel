@@ -57,10 +57,16 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `-login` | both | WebDAV username |
 | `-password` | both | WebDAV password |
 | `-timeout` | both | HTTP request timeout (default `60s`) |
+| `-poll-max` | both | Maximum poll interval when idle (default `500ms`) |
+| `-poll-min` | both | Starting poll interval, adaptive backoff (default `200ms`) |
+| `-coalesce` | both | Write coalescing window (default `10ms`) |
+| `-chunk-size` | both | Chunk size in bytes (default `131071`) |
+| `-puts` | both | Parallel upload limit (default `8`) |
+| `-read-min` | both | Minimum concurrent prefetch GETs (default `3`) |
+| `-read-max` | both | Maximum concurrent prefetch GETs (default `8`) |
 | `-socks-listen` | client | Address to listen for SOCKS5 connections (e.g. `127.0.0.1:1080`) |
 | `-socks-user` | client | SOCKS5 username for proxy authentication (optional) |
 | `-socks-pass` | client | SOCKS5 password for proxy authentication (optional) |
-| `-target` | server | Force all streams to a fixed `host:port` instead of using SOCKS5 destination |
 | `-proxy` | server | Upstream SOCKS5 proxy for outbound connections: `socks5://[user:pass@]host:port` |
 
 ## Advanced scenarios
@@ -89,38 +95,20 @@ webdav-tunnel -mode server ... \
   -proxy socks5://user:pass@proxy.example.com:1080
 ```
 
-### Force all connections to a fixed target
-
-Turns the tunnel into a simple TCP forwarder:
-
-```sh
-webdav-tunnel -mode server ... -target 192.168.1.10:22
-```
-
 ## Tuning
 
-Constants in [pipe.go](pipe.go) control throughput vs. rate-limit behaviour.
+The defaults are tuned for public cloud WebDAV. For a self-hosted VPS with no rate limits, use more aggressive values:
 
-**Public cloud WebDAV (default)**
+```sh
+# server
+webdav-tunnel -mode server ... \
+  -poll-min 50ms -poll-max 100ms \
+  -chunk-size 1048575 -puts 16 -read-max 16
 
-| Constant | Value | Notes |
-|----------|-------|-------|
-| `pollInterval` | 500 ms | Maximum poll backoff when idle |
-| `minPollInterval` | 200 ms | Starting poll interval (adaptive) |
-| `chunkDataSize` | 128 KB | Chunk size per file |
-| `maxConcurrentPuts` | 8 | Parallel uploads |
-| `maxReadAheadWindow` | 8 | Parallel prefetch GETs |
-
-**Self-hosted VPS (Apache / rclone, no rate limits)**
-
-Uncomment the VPS block in `pipe.go`:
-
-```go
-// pollInterval    = 100 * time.Millisecond
-// minPollInterval = 50 * time.Millisecond
-// coalesceDelay   = 5 * time.Millisecond
-// chunkDataSize   = 1024*1024 - 1
-// maxConcurrentPuts = 16
+# client
+webdav-tunnel -mode client ... \
+  -poll-min 50ms -poll-max 100ms \
+  -chunk-size 1048575 -puts 16 -read-max 16
 ```
 
 ## Notes

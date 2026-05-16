@@ -14,15 +14,17 @@ import (
 	"time"
 )
 
-const (
+var (
 	pollInterval       = 500 * time.Millisecond // maximum poll backoff when idle
-	minPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff (50ms for VPS)
+	minPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff
 	coalesceDelay      = 10 * time.Millisecond  // write coalescing window
 	chunkDataSize      = 128*1024 - 1           // chunk size chosen to avoid cloud timeouts
 	maxConcurrentPuts  = 8                      // parallel upload limit
 	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
-	maxReadAheadWindow = 8                      // maximum concurrent GETs under load (raise to improve upload throughput)
+	maxReadAheadWindow = 8                      // maximum concurrent GETs under load
+)
 
+const (
 	idleTimeout = 90 * time.Second
 
 	heartbeatInterval = 30 * time.Second

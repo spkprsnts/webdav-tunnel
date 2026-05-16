@@ -24,7 +24,23 @@ func main() {
 	socksPass := flag.String("socks-pass", "", "SOCKS5 proxy password (client mode, optional)")
 	proxyStr := flag.String("proxy", "", "upstream SOCKS5 proxy for the server: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "HTTP request timeout")
+
+	pollMax      := flag.Duration("poll-max", pollInterval, "maximum poll interval when idle")
+	pollMin      := flag.Duration("poll-min", minPollInterval, "starting poll interval (adaptive backoff)")
+	coalesce     := flag.Duration("coalesce", coalesceDelay, "write coalescing window")
+	chunkSize    := flag.Int("chunk-size", chunkDataSize, "chunk size in bytes")
+	puts         := flag.Int("puts", maxConcurrentPuts, "parallel upload limit")
+	readAheadMin := flag.Int("read-min", minReadAheadWindow, "minimum concurrent prefetch GETs")
+	readAheadMax := flag.Int("read-max", maxReadAheadWindow, "maximum concurrent prefetch GETs")
 	flag.Parse()
+
+	pollInterval       = *pollMax
+	minPollInterval    = *pollMin
+	coalesceDelay      = *coalesce
+	chunkDataSize      = *chunkSize
+	maxConcurrentPuts  = *puts
+	minReadAheadWindow = *readAheadMin
+	maxReadAheadWindow = *readAheadMax
 
 	if *webdavURL == "" || *login == "" || *password == "" {
 		log.Fatal("required flags: -webdav, -login, -password")
