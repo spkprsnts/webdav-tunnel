@@ -22,6 +22,13 @@ const (
 	muxWindowSize = 24 * 1024 * 1024 // 4 МБ
 )
 
+// proxyConfig задаёт upstream SOCKS5-прокси для исходящих соединений сервера.
+type proxyConfig struct {
+	addr string // host:port прокси
+	user string
+	pass string
+}
+
 var streamCounter atomic.Int64
 
 func yamuxConfig() *yamux.Config {
@@ -136,7 +143,7 @@ func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn) {
 // ── server: yamux-сервер ──────────────────────────────────────────────────────
 
 // serverMuxSession создаёт yamux-сессию поверх WebDAV-пайпа и принимает стримы.
-func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
+func serverMuxSession(dav *WebDAV, sid, connectAddr string, proxy *proxyConfig) {
 	if age := dav.SessionAge(context.Background(), sid); age > staleSessionAge {
 		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
 		// Удаляем init первым — ListSessions перестаёт видеть сессию немедленно,
@@ -159,7 +166,7 @@ func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 		if err != nil {
 			break
 		}
-		go serverStream(stream, connectAddr)
+		go serverStream(stream, connectAddr, proxy)
 	}
 
 	muxSess.Close()
@@ -167,7 +174,7 @@ func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 }
 
 // serverStream обрабатывает один yamux-стрим: читает цель и реле-ит трафик.
-func serverStream(stream net.Conn, connectAddr string) {
+func serverStream(stream net.Conn, connectAddr string, proxy *proxyConfig) {
 	defer stream.Close()
 
 	id := streamCounter.Add(1)
@@ -194,7 +201,13 @@ func serverStream(stream net.Conn, connectAddr string) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer dialCancel()
-	conn, err := dialTarget(dialCtx, host, port)
+	var conn net.Conn
+	var err error
+	if proxy != nil {
+		conn, err = dialViaSocks5(dialCtx, proxy, host, port)
+	} else {
+		conn, err = dialTarget(dialCtx, host, port)
+	}
 	if err != nil {
 		log.Printf("[s%d] dial %s failed: %v", id, target, err)
 		return

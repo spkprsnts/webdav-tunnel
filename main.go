@@ -7,6 +7,7 @@ import (
 	"flag"
 	"log"
 	"net"
+	"net/url"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ func main() {
 	password := flag.String("password", "", "WebDAV пароль / пароль приложения")
 	listen := flag.String("listen", "", "адрес прослушивания SOCKS5 (для mode client)")
 	target := flag.String("target", "", "принудительный target для всех стримов (для mode server, необязательно)")
+	proxyStr := flag.String("proxy", "", "upstream SOCKS5-прокси для сервера: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "таймаут HTTP-запросов")
 	flag.Parse()
 
@@ -47,7 +49,19 @@ func main() {
 		runProxy(dav, *listen)
 
 	case "server":
-		runServer(dav, *target)
+		var proxy *proxyConfig
+		if *proxyStr != "" {
+			u, err := url.Parse(*proxyStr)
+			if err != nil || u.Scheme != "socks5" || u.Host == "" {
+				log.Fatal("-proxy must be socks5://[user:pass@]host:port")
+			}
+			proxy = &proxyConfig{addr: u.Host}
+			if u.User != nil {
+				proxy.user = u.User.Username()
+				proxy.pass, _ = u.User.Password()
+			}
+		}
+		runServer(dav, *target, proxy)
 
 	default:
 		log.Fatal("-mode must be: client | server")
@@ -116,12 +130,15 @@ func runProxy(dav *WebDAV, listenAddr string) {
 
 // ── server (yamux-выход) ──────────────────────────────────────────────────────
 
-func runServer(dav *WebDAV, overrideTarget string) {
+func runServer(dav *WebDAV, overrideTarget string, proxy *proxyConfig) {
 	ensureTunnelDir(dav)
 	if overrideTarget != "" {
 		log.Printf("server mode: all streams forced to %s", overrideTarget)
 	} else {
 		log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
+	}
+	if proxy != nil {
+		log.Printf("server mode: routing through SOCKS5 proxy %s", proxy.addr)
 	}
 	go startupCleanup(dav)
 
@@ -164,7 +181,7 @@ func runServer(dav *WebDAV, overrideTarget string) {
 				continue
 			}
 			go func(id string) {
-				serverMuxSession(dav, id, overrideTarget)
+				serverMuxSession(dav, id, overrideTarget, proxy)
 				mu.Lock()
 				if e, ok := known[id]; ok {
 					e.closedAt = time.Now()

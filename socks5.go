@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 )
 
 const socks5Version = 0x05
@@ -88,4 +90,119 @@ func socks5Handshake(conn net.Conn) (host string, port uint16, err error) {
 	port = binary.BigEndian.Uint16(portBuf)
 
 	return
+}
+
+// dialViaSocks5 подключается к targetHost:targetPort через SOCKS5-прокси.
+// DNS-резолвинг происходит на стороне прокси (SOCKS5h).
+func dialViaSocks5(ctx context.Context, proxy *proxyConfig, targetHost, targetPort string) (net.Conn, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxy.addr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to SOCKS5 proxy %s: %w", proxy.addr, err)
+	}
+	if err := socks5Connect(conn, proxy.user, proxy.pass, targetHost, targetPort); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// socks5Connect выполняет клиентский SOCKS5-хендшейк и команду CONNECT.
+func socks5Connect(conn net.Conn, user, pass, host, port string) error {
+	// greeting — предлагаем no-auth, и user/pass если есть учётные данные
+	if user != "" {
+		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+			return err
+		}
+	} else {
+		if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+			return err
+		}
+	}
+
+	var resp [2]byte
+	if _, err := io.ReadFull(conn, resp[:]); err != nil {
+		return fmt.Errorf("SOCKS5 greeting: %w", err)
+	}
+	if resp[0] != 0x05 {
+		return fmt.Errorf("SOCKS5: unexpected version %d from proxy", resp[0])
+	}
+
+	switch resp[1] {
+	case 0x00: // no auth
+	case 0x02: // username/password (RFC 1929)
+		if user == "" {
+			return fmt.Errorf("SOCKS5 proxy requires authentication")
+		}
+		auth := make([]byte, 0, 3+len(user)+len(pass))
+		auth = append(auth, 0x01, byte(len(user)))
+		auth = append(auth, user...)
+		auth = append(auth, byte(len(pass)))
+		auth = append(auth, pass...)
+		if _, err := conn.Write(auth); err != nil {
+			return err
+		}
+		var ar [2]byte
+		if _, err := io.ReadFull(conn, ar[:]); err != nil {
+			return fmt.Errorf("SOCKS5 auth: %w", err)
+		}
+		if ar[1] != 0x00 {
+			return fmt.Errorf("SOCKS5 authentication failed")
+		}
+	case 0xFF:
+		return fmt.Errorf("SOCKS5: proxy rejected all auth methods")
+	default:
+		return fmt.Errorf("SOCKS5: unsupported auth method 0x%02x", resp[1])
+	}
+
+	// CONNECT request — передаём hostname (ATYP=0x03), резолвинг на прокси
+	portNum, _ := strconv.Atoi(port)
+	req := make([]byte, 0, 7+len(host))
+	req = append(req, 0x05, 0x01, 0x00, 0x03, byte(len(host)))
+	req = append(req, host...)
+	req = append(req, byte(portNum>>8), byte(portNum&0xff))
+	if _, err := conn.Write(req); err != nil {
+		return err
+	}
+
+	// ответ: VER REP RSV ATYP
+	var rep [4]byte
+	if _, err := io.ReadFull(conn, rep[:]); err != nil {
+		return fmt.Errorf("SOCKS5 CONNECT response: %w", err)
+	}
+	if rep[0] != 0x05 {
+		return fmt.Errorf("SOCKS5: unexpected version in CONNECT response")
+	}
+	if rep[1] != 0x00 {
+		return fmt.Errorf("SOCKS5 CONNECT rejected: code 0x%02x", rep[1])
+	}
+
+	// вычитываем bound address (нам не нужен, но обязательно читаем)
+	switch rep[3] {
+	case 0x01:
+		var buf [4]byte
+		_, err := io.ReadFull(conn, buf[:])
+		if err != nil {
+			return err
+		}
+	case 0x03:
+		var l [1]byte
+		if _, err := io.ReadFull(conn, l[:]); err != nil {
+			return err
+		}
+		if _, err := io.ReadFull(conn, make([]byte, l[0])); err != nil {
+			return err
+		}
+	case 0x04:
+		var buf [16]byte
+		if _, err := io.ReadFull(conn, buf[:]); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("SOCKS5: unknown address type 0x%02x in response", rep[3])
+	}
+	var pbuf [2]byte
+	if _, err := io.ReadFull(conn, pbuf[:]); err != nil {
+		return err
+	}
+	return nil
 }
