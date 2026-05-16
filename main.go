@@ -125,7 +125,7 @@ func runServer(dav *WebDAV, overrideTarget string) {
 	}
 	go startupCleanup(dav)
 
-	known := make(map[string]bool)
+	known := make(map[string]struct{})
 	var mu sync.Mutex
 
 	for {
@@ -137,18 +137,18 @@ func runServer(dav *WebDAV, overrideTarget string) {
 		}
 		for _, sid := range sessions {
 			mu.Lock()
-			if known[sid] {
-				mu.Unlock()
+			_, seen := known[sid]
+			if !seen {
+				known[sid] = struct{}{}
+			}
+			mu.Unlock()
+			if seen {
 				continue
 			}
-			known[sid] = true
-			mu.Unlock()
-
 			go func(id string) {
 				serverMuxSession(dav, id, overrideTarget)
-				mu.Lock()
-				delete(known, id)
-				mu.Unlock()
+				// Намеренно не удаляем из known: сессия завершена и не вернётся.
+				// Удаление приводило к повторной обработке при медленном удалении на WebDAV.
 			}(sid)
 		}
 		time.Sleep(3 * time.Second)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -14,10 +15,11 @@ import (
 
 const (
 	// --- НАСТРОЙКИ ДЛЯ ПУБЛИЧНЫХ ОБЛАКОВ (Яндекс, Mail.ru и др. с лимитами) ---
-	pollInterval      = 500 * time.Millisecond // Реже опрашиваем 404, чтобы не злить анти-бот
-	chunkDataSize     = 128*1024 - 1           // Оптимальный размер чанка, чтобы не ловить таймауты
-	maxConcurrentPuts = 8                      // Лимит параллельных отправок
-	readAheadWindow   = 3                      // Уменьшаем ширину окна, чтобы не спамить 404-ошибками
+	pollInterval       = 500 * time.Millisecond // Реже опрашиваем 404, чтобы не злить анти-бот
+	chunkDataSize      = 128*1024 - 1           // Оптимальный размер чанка, чтобы не ловить таймауты
+	maxConcurrentPuts  = 8                      // Лимит параллельных отправок
+	minReadAheadWindow = 3                      // minimum concurrent GETs (idle baseline)
+	maxReadAheadWindow = 8                      // maximum concurrent GETs under load (raise to improve upload throughput)
 
 	// --- НАСТРОЙКИ ДЛЯ СВОЕГО VPS (Apache/rclone без лимитов) ---
 	// pollInterval      = 100 * time.Millisecond
@@ -60,6 +62,12 @@ type Pipe struct {
 	startOnce sync.Once
 	wg        sync.WaitGroup
 	putSem    chan struct{}
+
+	latMu      sync.Mutex
+	latMax     time.Duration
+	latSum     time.Duration
+	latCount   int
+	latLastLog time.Time
 }
 
 func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string) *Pipe {
@@ -226,14 +234,15 @@ func (p *Pipe) startWriter() {
 			seq := p.writeSeq.Add(1)
 			eofChunk := isEOF && n == 0 // EOF только когда данных нет — отдельный маркер
 
-			payload := make([]byte, 1+n)
+			payload := make([]byte, 1+8+n)
 			if eofChunk {
 				payload[0] = headerEOF
 			} else {
 				payload[0] = headerData
 			}
+			binary.BigEndian.PutUint64(payload[1:9], uint64(time.Now().UnixNano()))
 			if n > 0 {
-				copy(payload[1:], data)
+				copy(payload[9:], data)
 			}
 
 			p.wg.Add(1)
@@ -319,25 +328,34 @@ func (p *Pipe) startWriter() {
 }
 
 func (p *Pipe) startReader() {
-	var nextSeq int64 = 1
 	type fetchResult struct {
-		seq  int64
-		data []byte
+		seq    int64
+		data   []byte
+		polled bool
 	}
-	fetchDone := make(chan fetchResult, readAheadWindow+2)
+	fetchDone := make(chan fetchResult, maxReadAheadWindow+4)
 
-	fetchNext := func(seq int64) {
+	var (
+		nextSeq   int64 = 1
+		nextFetch int64 = 1
+		inFlight  int
+		window    = minReadAheadWindow
+	)
+
+	launch := func() {
+		seq := nextFetch
+		nextFetch++
+		inFlight++
 		go func() {
 			path := p.chunkPath(p.readDir, seq)
+			polled := false
 			for {
-				select {
-				case <-p.ctx.Done():
+				if p.ctx.Err() != nil {
 					return
-				default:
 				}
-
 				chunk, status, err := p.dav.Get(p.ctx, path)
 				if err != nil || status == 404 || len(chunk) == 0 {
+					polled = true
 					select {
 					case <-time.After(pollInterval):
 						continue
@@ -345,10 +363,9 @@ func (p *Pipe) startReader() {
 						return
 					}
 				}
-				// Delete в фоне с независимым контекстом: хотим удалить даже если p.ctx отменён.
 				go p.dav.Delete(context.Background(), path)
 				select {
-				case fetchDone <- fetchResult{seq, chunk}:
+				case fetchDone <- fetchResult{seq, chunk, polled}:
 				case <-p.ctx.Done():
 				}
 				return
@@ -356,9 +373,13 @@ func (p *Pipe) startReader() {
 		}()
 	}
 
-	for i := 0; i < readAheadWindow; i++ {
-		fetchNext(nextSeq + int64(i))
+	fill := func() {
+		for inFlight < window {
+			launch()
+		}
 	}
+
+	fill()
 
 	results := make(map[int64][]byte)
 	for {
@@ -366,26 +387,45 @@ func (p *Pipe) startReader() {
 		case <-p.ctx.Done():
 			return
 		case res := <-fetchDone:
-			results[res.seq] = res.data
-			for {
-				if chunk, ok := results[nextSeq]; ok {
-					delete(results, nextSeq)
-
-					if chunk[0] == headerEOF {
-						close(p.readCh)
-						return
-					}
-					select {
-					case p.readCh <- chunk[1:]:
-						nextSeq++
-						fetchNext(nextSeq + int64(readAheadWindow) - 1)
-					case <-p.ctx.Done():
-						return
-					}
-				} else {
-					break
+			inFlight--
+			if !res.polled {
+				if window < maxReadAheadWindow {
+					window++
+				}
+			} else {
+				if window > minReadAheadWindow {
+					window--
 				}
 			}
+
+			results[res.seq] = res.data
+			for {
+				chunk, ok := results[nextSeq]
+				if !ok {
+					break
+				}
+				delete(results, nextSeq)
+
+				if len(chunk) < 9 {
+					log.Printf("[%s] malformed chunk seq=%d len=%d", p.sessionID, nextSeq, len(chunk))
+					p.doneOnce.Do(func() { close(p.doneCh) })
+					return
+				}
+				ts := int64(binary.BigEndian.Uint64(chunk[1:9]))
+				p.recordLatency(time.Since(time.Unix(0, ts)))
+
+				if chunk[0] == headerEOF {
+					close(p.readCh)
+					return
+				}
+				select {
+				case p.readCh <- chunk[9:]:
+					nextSeq++
+				case <-p.ctx.Done():
+					return
+				}
+			}
+			fill()
 		}
 	}
 }
@@ -458,6 +498,27 @@ func (p *Pipe) Cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	p.dav.Delete(ctx, fmt.Sprintf("tunnel/%s", p.sessionID))
+}
+
+func (p *Pipe) recordLatency(d time.Duration) {
+	p.latMu.Lock()
+	defer p.latMu.Unlock()
+	if d > p.latMax {
+		p.latMax = d
+	}
+	p.latSum += d
+	p.latCount++
+	now := time.Now()
+	if now.Sub(p.latLastLog) >= 10*time.Second {
+		avg := p.latSum / time.Duration(p.latCount)
+		log.Printf("[%s] ← %s latency: avg=%v max=%v chunks=%d",
+			p.sessionID, p.readDir,
+			avg.Round(time.Millisecond), p.latMax.Round(time.Millisecond), p.latCount)
+		p.latMax = 0
+		p.latSum = 0
+		p.latCount = 0
+		p.latLastLog = now
+	}
 }
 
 // PipeConn адаптирует Pipe к io.ReadWriteCloser для yamux.

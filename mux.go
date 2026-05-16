@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	// --- НАСТРОЙКИ YAMUX ДЛЯ ПУБЛИЧНЫХ ОБЛАКОВ ---
-	muxWindowSize = 512 * 1024 // 512 КБ: Избегаем закупорки трафика (Bufferbloat) при узком канале
-
-	// --- НАСТРОЙКИ YAMUX ДЛЯ СВОЕГО VPS ---
-	// muxWindowSize = 4 * 1024 * 1024 // 4 МБ: Максимальный разгон TCP-алгоритмов на широком канале
+	// --- НАСТРОЙКИ YAMUX ---
+	// Формула: window = RTT × желаемый_throughput
+	// Измеренные RTT на Beeline WebDAV: c2s ~1.9s, s2c ~2.9s
+	// При 4 МБ окне: upload ~2 MB/s на стрим, download ~1.4 MB/s на стрим
+	muxWindowSize = 24 * 1024 * 1024 // 4 МБ
 )
 
 var streamCounter atomic.Int64
@@ -35,9 +35,36 @@ func yamuxConfig() *yamux.Config {
 
 // ── proxy: yamux-клиент ───────────────────────────────────────────────────────
 
+const streamPoolSize = 16
+
 // proxyMuxLoop принимает SOCKS5-соединения из connCh и открывает yamux-стримы.
+// Поддерживает пул заранее открытых стримов, чтобы устранить задержку SYN/ACK
+// (~5s на медленном WebDAV) из критического пути установки соединения.
 // Завершается когда mux закрыт.
 func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
+	pool := make(chan net.Conn, streamPoolSize)
+
+	refill := func() {
+		go func() {
+			if mux.IsClosed() {
+				return
+			}
+			stream, err := mux.Open()
+			if err != nil {
+				return
+			}
+			select {
+			case pool <- stream:
+			default:
+				stream.Close() // пул переполнился пока открывали
+			}
+		}()
+	}
+
+	for i := 0; i < streamPoolSize; i++ {
+		refill()
+	}
+
 	for {
 		if mux.IsClosed() {
 			return
@@ -51,28 +78,51 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
 				conn.Close()
 				return
 			}
-			go proxyStream(mux, conn)
+			var preOpened net.Conn
+			select {
+			case preOpened = <-pool:
+				refill() // сразу восполняем пул
+			default:
+				// пул пуст — proxyStream откроет сам
+			}
+			go proxyStream(mux, conn, preOpened)
 		case <-time.After(200 * time.Millisecond):
-			// периодически проверяем mux.IsClosed()
 		}
 	}
 }
 
 // proxyStream обрабатывает одно SOCKS5-соединение через yamux-стрим.
-func proxyStream(mux *yamux.Session, conn net.Conn) {
+// preOpened — заранее открытый стрим из пула (nil → открываем здесь).
+func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn) {
 	defer conn.Close()
 
 	host, port, err := socks5Handshake(conn)
 	if err != nil {
+		if preOpened != nil {
+			preOpened.Close()
+		}
 		return
 	}
 
-	stream, err := mux.Open()
-	if err != nil {
-		log.Printf("mux stream open failed: %v", err)
-		return
+	var stream net.Conn
+	if preOpened != nil {
+		stream = preOpened
+	} else {
+		var openErr error
+		stream, openErr = mux.Open()
+		if openErr != nil {
+			log.Printf("mux stream open failed: %v", openErr)
+			conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return
+		}
 	}
 	defer stream.Close()
+
+	// SOCKS5 success: с пулом стрим уже открыт, отвечаем мгновенно.
+	// Без пула — только после mux.Open(), чтобы upload-тесты не получали 0.
+	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+		return
+	}
 
 	id := streamCounter.Add(1)
 	log.Printf("[s%d] SOCKS5 connect %s:%d", id, host, port)
@@ -91,6 +141,9 @@ func proxyStream(mux *yamux.Session, conn net.Conn) {
 func serverMuxSession(dav *WebDAV, sid, connectAddr string) {
 	if age := dav.SessionAge(context.Background(), sid); age > staleSessionAge {
 		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
+		// Удаляем init первым — ListSessions перестаёт видеть сессию немедленно,
+		// даже если удаление директории зависнет или провалится.
+		dav.Delete(context.Background(), "tunnel/"+sid+"/init")
 		dav.Delete(context.Background(), "tunnel/"+sid)
 		return
 	}

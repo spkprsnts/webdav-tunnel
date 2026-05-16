@@ -87,8 +87,5 @@ func socks5Handshake(conn net.Conn) (host string, port uint16, err error) {
 	}
 	port = binary.BigEndian.Uint16(portBuf)
 
-	// --- success reply ---
-	// BND.ADDR = 0.0.0.0, BND.PORT = 0
-	_, err = conn.Write([]byte{socks5Version, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	return
 }
