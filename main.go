@@ -19,7 +19,9 @@ func main() {
 	webdavURL := flag.String("webdav", "", "WebDAV URL (напр. https://webdav.yandex.ru)")
 	login := flag.String("login", "", "WebDAV логин")
 	password := flag.String("password", "", "WebDAV пароль / пароль приложения")
-	listen := flag.String("listen", "", "адрес прослушивания SOCKS5 (для mode client)")
+	listen := flag.String("socks-listen", "", "адрес прослушивания SOCKS5 (для mode client)")
+	socksUser := flag.String("socks-user", "", "логин для SOCKS5 (client mode, необязательно)")
+	socksPass := flag.String("socks-pass", "", "пароль для SOCKS5 (client mode, необязательно)")
 	target := flag.String("target", "", "принудительный target для всех стримов (для mode server, необязательно)")
 	proxyStr := flag.String("proxy", "", "upstream SOCKS5-прокси для сервера: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "таймаут HTTP-запросов")
@@ -44,9 +46,12 @@ func main() {
 	switch *mode {
 	case "client":
 		if *listen == "" {
-			log.Fatal("-listen required for client mode")
+			log.Fatal("-socks-listen required for client mode")
 		}
-		runProxy(dav, *listen)
+		if *socksUser != "" {
+				log.Printf("SOCKS5 auth enabled for user %q", *socksUser)
+			}
+			runProxy(dav, *listen, *socksUser, *socksPass)
 
 	case "server":
 		var proxy *proxyConfig
@@ -73,7 +78,7 @@ func main() {
 // Один WebDAV-пайп на весь клиент. Каждое SOCKS5-соединение — отдельный yamux-стрим.
 // При разрыве пайпа клиент автоматически создаёт новый.
 
-func runProxy(dav *WebDAV, listenAddr string) {
+func runProxy(dav *WebDAV, listenAddr, socksUser, socksPass string) {
 	ensureTunnelDir(dav)
 
 	ln, err := net.Listen("tcp", listenAddr)
@@ -118,7 +123,7 @@ func runProxy(dav *WebDAV, listenAddr string) {
 		}
 		log.Printf("[%s] mux ready", sid)
 
-		proxyMuxLoop(muxSess, connCh)
+		proxyMuxLoop(muxSess, connCh, socksUser, socksPass)
 
 		muxSess.Close()
 		close(hbDone)

@@ -14,7 +14,9 @@ const socks5Version = 0x05
 // Handshake выполняет SOCKS5-рукопожатие и возвращает целевой host и port.
 // Поддерживает IPv4, IPv6 и доменные имена (SOCKS5h — резолвинг на сервере).
 // После успешного возврата соединение готово к передаче данных.
-func socks5Handshake(conn net.Conn) (host string, port uint16, err error) {
+// socks5Handshake выполняет SOCKS5-рукопожатие.
+// Если user != "", требует аутентификацию методом username/password (RFC 1929).
+func socks5Handshake(conn net.Conn, user, pass string) (host string, port uint16, err error) {
 	// --- greeting ---
 	hdr := make([]byte, 2)
 	if _, err = io.ReadFull(conn, hdr); err != nil {
@@ -28,9 +30,54 @@ func socks5Handshake(conn net.Conn) (host string, port uint16, err error) {
 	if _, err = io.ReadFull(conn, methods); err != nil {
 		return
 	}
-	// выбираем «без авторизации»
-	if _, err = conn.Write([]byte{socks5Version, 0x00}); err != nil {
+
+	// --- выбор метода ---
+	wantAuth := user != ""
+	var selected byte = 0xFF
+	for _, m := range methods {
+		if !wantAuth && m == 0x00 {
+			selected = 0x00
+			break
+		}
+		if wantAuth && m == 0x02 {
+			selected = 0x02
+			break
+		}
+	}
+	if _, err = conn.Write([]byte{socks5Version, selected}); err != nil {
 		return
+	}
+	if selected == 0xFF {
+		err = fmt.Errorf("client offered no acceptable auth method")
+		return
+	}
+
+	// --- RFC 1929: username/password sub-negotiation ---
+	if selected == 0x02 {
+		var subHdr [2]byte // VER(1) ULEN(1)
+		if _, err = io.ReadFull(conn, subHdr[:]); err != nil {
+			return
+		}
+		uname := make([]byte, subHdr[1])
+		if _, err = io.ReadFull(conn, uname); err != nil {
+			return
+		}
+		var plenBuf [1]byte
+		if _, err = io.ReadFull(conn, plenBuf[:]); err != nil {
+			return
+		}
+		passwd := make([]byte, plenBuf[0])
+		if _, err = io.ReadFull(conn, passwd); err != nil {
+			return
+		}
+		if string(uname) != user || string(passwd) != pass {
+			conn.Write([]byte{0x01, 0x01}) // auth failure
+			err = fmt.Errorf("SOCKS5 authentication failed")
+			return
+		}
+		if _, err = conn.Write([]byte{0x01, 0x00}); err != nil { // auth success
+			return
+		}
 	}
 
 	// --- request ---

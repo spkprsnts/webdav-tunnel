@@ -48,7 +48,7 @@ const streamPoolSize = 16
 // Поддерживает пул заранее открытых стримов, чтобы устранить задержку SYN/ACK
 // (~5s на медленном WebDAV) из критического пути установки соединения.
 // Завершается когда mux закрыт.
-func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
+func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn, user, pass string) {
 	pool := make(chan net.Conn, streamPoolSize)
 
 	refill := func() {
@@ -89,7 +89,7 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
 			default:
 				// пул пуст — proxyStream откроет сам
 			}
-			go proxyStream(mux, conn, preOpened)
+			go proxyStream(mux, conn, preOpened, user, pass)
 		case <-mux.CloseChan():
 			return
 		}
@@ -98,10 +98,10 @@ func proxyMuxLoop(mux *yamux.Session, connCh <-chan net.Conn) {
 
 // proxyStream обрабатывает одно SOCKS5-соединение через yamux-стрим.
 // preOpened — заранее открытый стрим из пула (nil → открываем здесь).
-func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn) {
+func proxyStream(mux *yamux.Session, conn net.Conn, preOpened net.Conn, user, pass string) {
 	defer conn.Close()
 
-	host, port, err := socks5Handshake(conn)
+	host, port, err := socks5Handshake(conn, user, pass)
 	if err != nil {
 		if preOpened != nil {
 			preOpened.Close()
