@@ -12,12 +12,12 @@ A TCP tunnel that uses any WebDAV server as a transport layer. Traffic is serial
 
 - The **client** exposes a local SOCKS5 proxy. Each incoming connection opens a [yamux](https://github.com/hashicorp/yamux) stream over a shared WebDAV pipe.
 - The **server** polls the same WebDAV storage, picks up sessions, and relays TCP traffic to the destination.
-- Data is split into numbered binary chunks stored as files. The reader uses adaptive polling (200 ms → 500 ms backoff) and a read-ahead window to maximize throughput while staying within cloud rate limits.
+- Data is split into numbered binary chunks stored as files. The reader uses adaptive polling and a read-ahead window to maximize throughput while staying within cloud rate limits.
 
 ## Requirements
 
 - Go 1.22+
-- Any WebDAV server or cloud storage with WebDAV support
+- A WebDAV server (cloud storage or self-hosted — see [Self-hosted mode](#self-hosted-mode))
 
 ## Build
 
@@ -25,10 +25,57 @@ A TCP tunnel that uses any WebDAV server as a transport layer. Traffic is serial
 go build -o webdav-tunnel .
 ```
 
-## Usage
+## Modes
 
-### Server (exit node)
+### Self-hosted mode
 
+The server runs its own embedded WebDAV server — no external storage needed.
+
+**Server:**
+```sh
+webdav-tunnel \
+  -mode selfhosted \
+  -webdav-listen :8080 \
+  -login myuser \
+  -password mypass
+```
+
+After startup the server prints a ready-to-use client URI with all tuning settings embedded:
+
+```
+selfhosted: ════════════════════════════════════════════════════
+selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=5ms&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
+selfhosted: ════════════════════════════════════════════════════
+```
+
+Replace `YOUR_SERVER_IP` with the server's public IP or hostname.
+
+**Client** — paste the URI from the server output:
+```sh
+webdav-tunnel \
+  -mode client \
+  -uri "webdav://myuser:mypass@server-ip:8080" \
+  -socks-listen 127.0.0.1:1080
+```
+
+With TLS (`webdavs://`):
+```sh
+webdav-tunnel \
+  -mode selfhosted \
+  -webdav-listen :443 \
+  -webdav-tls-cert /etc/ssl/cert.pem \
+  -webdav-tls-key  /etc/ssl/key.pem \
+  -login myuser \
+  -password mypass
+```
+
+The client URI will use `webdavs://` automatically.
+
+### External WebDAV (server + client)
+
+Use any WebDAV-capable cloud storage (Box, Nextcloud, etc.) as the relay.
+
+**Server (exit node):**
 ```sh
 webdav-tunnel \
   -mode server \
@@ -37,8 +84,7 @@ webdav-tunnel \
   -password <password>
 ```
 
-### Client (SOCKS5 proxy)
-
+**Client (SOCKS5 proxy):**
 ```sh
 webdav-tunnel \
   -mode client \
@@ -50,26 +96,53 @@ webdav-tunnel \
 
 Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 
+## Client URI format
+
+The `-uri` flag is a compact alternative to `-webdav`/`-login`/`-password` and tuning flags combined:
+
+```
+webdav://user:pass@host:port[?tuning]    →  HTTP
+webdavs://user:pass@host:port[?tuning]   →  HTTPS (TLS)
+```
+
+In selfhosted mode the server prints the URI with all its current tuning settings baked in as query parameters:
+
+```
+webdav://user:pass@1.2.3.4:8080?chunk-size=131071&coalesce=5ms&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
+```
+
+The client applies these values for any tuning flag not explicitly set on the command line. An explicit flag always wins:
+
+```sh
+# use server's tuning except override poll-max
+webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -poll-max 200ms
+```
+
 ## All flags
 
-| Flag | Mode | Description |
-|------|------|-------------|
-| `-mode` | both | `client` or `server` |
-| `-webdav` | both | WebDAV base URL |
-| `-login` | both | WebDAV username |
-| `-password` | both | WebDAV password |
-| `-timeout` | both | HTTP request timeout (default `60s`) |
-| `-poll-max` | both | Maximum poll interval when idle (default `500ms`) |
-| `-poll-min` | both | Starting poll interval, adaptive backoff (default `200ms`) |
-| `-coalesce` | both | Write coalescing window (default `10ms`) |
-| `-chunk-size` | both | Chunk size in bytes (default `131071`) |
-| `-puts` | both | Parallel upload limit (default `8`) |
-| `-read-min` | both | Minimum concurrent prefetch GETs (default `3`) |
-| `-read-max` | both | Maximum concurrent prefetch GETs (default `8`) |
-| `-socks-listen` | client | Address to listen for SOCKS5 connections (e.g. `127.0.0.1:1080`) |
-| `-socks-user` | client | SOCKS5 username for proxy authentication (optional) |
-| `-socks-pass` | client | SOCKS5 password for proxy authentication (optional) |
-| `-proxy` | server | Upstream SOCKS5 proxy for outbound connections: `socks5://[user:pass@]host:port` |
+| Flag | Mode | Default | Description |
+|------|------|---------|-------------|
+| `-mode` | — | required | `client`, `server`, or `selfhosted` |
+| `-uri` | client | — | Connection URI (`webdav://user:pass@host:port`), replaces `-webdav`/`-login`/`-password` |
+| `-webdav` | client, server | required | WebDAV base URL |
+| `-login` | all | required | WebDAV username |
+| `-password` | all | required | WebDAV password |
+| `-timeout` | all | `60s` | HTTP request timeout |
+| `-poll-max` | all | `500ms` (selfhosted: `100ms`) | Maximum poll interval when idle |
+| `-poll-min` | all | `200ms` (selfhosted: `50ms`) | Starting poll interval, adaptive backoff |
+| `-coalesce` | all | `10ms` (selfhosted: `5ms`) | Write coalescing window |
+| `-chunk-size` | all | `131071` | Chunk size in bytes |
+| `-puts` | all | `8` (selfhosted: `16`) | Parallel upload limit |
+| `-read-min` | all | `3` | Minimum concurrent prefetch GETs |
+| `-read-max` | all | `8` (selfhosted: `16`) | Maximum concurrent prefetch GETs |
+| `-socks-listen` | client | required | Address for SOCKS5 listener (e.g. `127.0.0.1:1080`) |
+| `-socks-user` | client | — | SOCKS5 username for proxy authentication |
+| `-socks-pass` | client | — | SOCKS5 password for proxy authentication |
+| `-proxy` | server, selfhosted | — | Upstream SOCKS5 proxy: `socks5://[user:pass@]host:port` |
+| `-webdav-listen` | selfhosted | required | Address for embedded WebDAV (e.g. `:8080`) |
+| `-webdav-storage` | selfhosted | `webdav-data` | Directory for session data |
+| `-webdav-tls-cert` | selfhosted | — | TLS certificate file |
+| `-webdav-tls-key` | selfhosted | — | TLS key file |
 
 ## Advanced scenarios
 
@@ -99,7 +172,7 @@ webdav-tunnel -mode server ... \
 
 ## Tuning
 
-The defaults are tuned for public cloud WebDAV. For a self-hosted VPS with no rate limits, use more aggressive values:
+Self-hosted mode automatically applies aggressive defaults (fast local disk, no rate limits). For external WebDAV on a low-latency server you can tune manually:
 
 ```sh
 # server
@@ -107,7 +180,7 @@ webdav-tunnel -mode server ... \
   -poll-min 50ms -poll-max 100ms \
   -chunk-size 1048575 -puts 16 -read-max 16
 
-# client
+# client (match to server RTT)
 webdav-tunnel -mode client ... \
   -poll-min 50ms -poll-max 100ms \
   -chunk-size 1048575 -puts 16 -read-max 16
