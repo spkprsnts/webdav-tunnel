@@ -56,6 +56,7 @@ type Pipe struct {
 
 	writeCh   chan []byte
 	readCh    chan []byte
+	deleteCh  chan string
 	startOnce sync.Once
 	wg        sync.WaitGroup
 	putSem    chan struct{}
@@ -79,6 +80,7 @@ func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string) *Pipe {
 		doneCh:    make(chan struct{}),
 		writeCh:   make(chan []byte, 128),
 		readCh:    make(chan []byte, 128),
+		deleteCh:  make(chan string, 1024),
 		putSem:    make(chan struct{}, MaxConcurrentPuts),
 	}
 	// When doneCh closes, cancel the context immediately to abort stalled HTTP requests.
@@ -215,9 +217,29 @@ func (p *Pipe) WatchDone() {
 	}()
 }
 
+const deleteWorkers = 4
+
 func (p *Pipe) start() {
 	go p.startWriter()
 	go p.startReader()
+	for range deleteWorkers {
+		go p.startDeleter()
+	}
+}
+
+// startDeleter drains deleteCh with a fixed concurrency, preventing the
+// unbounded goroutine-per-chunk pattern from starving PUT connections.
+func (p *Pipe) startDeleter() {
+	for {
+		select {
+		case path := <-p.deleteCh:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			p.dav.Delete(ctx, path)
+			cancel()
+		case <-p.ctx.Done():
+			return
+		}
+	}
 }
 
 func (p *Pipe) startWriter() {
@@ -407,11 +429,11 @@ func (p *Pipe) startReader() {
 						return
 					}
 				}
-				go func(chunkPath string) {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					p.dav.Delete(ctx, chunkPath)
-				}(path)
+				select {
+				case p.deleteCh <- path:
+				default:
+					// queue full — Cleanup() will remove the session dir on close
+				}
 				select {
 				case fetchDone <- fetchResult{seq, chunk, polled}:
 				case <-p.ctx.Done():
