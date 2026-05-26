@@ -39,7 +39,7 @@ var streamCounter atomic.Int64
 
 func yamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = false // we use our own heartbeat
+	cfg.EnableKeepAlive = true
 	cfg.ConnectionWriteTimeout = 120 * time.Second
 	cfg.MaxStreamWindowSize = uint32(muxWindowSize)
 	cfg.LogOutput = io.Discard
@@ -324,6 +324,11 @@ func serverMuxSession(dav *WebDAV, sid string, proxy *ProxyConfig) {
 	}
 
 	pipe := NewPipe(dav, sid, "s2c", "c2s")
+
+	// Signal to the client that this session has been picked up.
+	dav.Put(context.Background(), "tunnel/"+sid+"/srv-hb",
+		[]byte(strconv.FormatInt(time.Now().Unix(), 10)))
+
 	muxSess, err := yamux.Server(NewPipeConn(pipe), yamuxConfig())
 	if err != nil {
 		log.Printf("[%s] yamux server error: %v", sid, err)

@@ -71,7 +71,8 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 			}
 			continue
 		}
-		log.Printf("[%s] mux ready", sid)
+		log.Printf("[%s] mux ready, waiting for server...", sid)
+		go watchServerPresence(ctx, dav, sid, muxSess.CloseChan())
 
 		proxyMuxLoop(ctx, muxSess, connCh, socksUser, socksPass)
 
@@ -148,6 +149,48 @@ func RunServer(dav *WebDAV, proxy *ProxyConfig) {
 			}(sid)
 		}
 		time.Sleep(3 * time.Second)
+	}
+}
+
+func watchServerPresence(ctx context.Context, dav *WebDAV, sid string, muxClosed <-chan struct{}) {
+	hbPath := "tunnel/" + sid + "/srv-hb"
+
+	// Phase 1: wait up to 45 s for the server to write srv-hb.
+	deadline := time.NewTimer(45 * time.Second)
+	tick := time.NewTicker(3 * time.Second)
+waitLoop:
+	for {
+		select {
+		case <-muxClosed:
+			deadline.Stop()
+			tick.Stop()
+			return
+		case <-ctx.Done():
+			deadline.Stop()
+			tick.Stop()
+			return
+		case <-deadline.C:
+			tick.Stop()
+			log.Printf("[%s] server has not picked up the session — is the server running?", sid)
+			return
+		case <-tick.C:
+			_, status, _ := dav.Get(ctx, hbPath)
+			if status == 200 {
+				log.Printf("[%s] server connected", sid)
+				deadline.Stop()
+				tick.Stop()
+				break waitLoop
+			}
+		}
+	}
+
+	// Phase 2: mux closing after a successful connection means server went away.
+	select {
+	case <-muxClosed:
+		if ctx.Err() == nil {
+			log.Printf("[%s] server connection lost", sid)
+		}
+	case <-ctx.Done():
 	}
 }
 
