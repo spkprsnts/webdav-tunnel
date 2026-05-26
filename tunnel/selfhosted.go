@@ -3,11 +3,14 @@ package tunnel
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -18,7 +21,7 @@ import (
 // session data in storageDir, and then runs the tunnel server loop against it.
 // Blocks indefinitely. Clients connect using:
 //
-//	-mode client -webdav <public-url> -login <login> -password <password>
+//	-mode client -uri <printed-uri> -socks-listen 127.0.0.1:1080
 func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration) {
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		log.Fatalf("selfhosted: cannot create storage dir %q: %v", storageDir, err)
@@ -29,9 +32,10 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 		LockSystem: webdav.NewMemLS(),
 	}
 
+	// Wrap with atomic PUT handler to prevent concurrent GET seeing a partial write.
 	srv := &http.Server{
 		Addr:              listenAddr,
-		Handler:           basicAuth(login, password, wdHandler),
+		Handler:           basicAuth(login, password, &atomicPUTHandler{storageDir: storageDir, next: wdHandler}),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -73,6 +77,49 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password))
 
 	RunServer(dav, proxy)
+}
+
+// atomicPUTHandler intercepts PUT requests and writes via temp-file + rename,
+// so concurrent GETs never observe a partially-written chunk file.
+// All other WebDAV methods are forwarded to next unchanged.
+type atomicPUTHandler struct {
+	storageDir string
+	next       http.Handler
+}
+
+func (h *atomicPUTHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "PUT" {
+		h.next.ServeHTTP(w, r)
+		return
+	}
+
+	rel := path.Clean("/" + r.URL.Path)
+	target := filepath.Join(h.storageDir, filepath.FromSlash(rel))
+	dir := filepath.Dir(target)
+
+	tmp, err := os.CreateTemp(dir, ".chunk-")
+	if err != nil {
+		// Directory probably doesn't exist yet (MKCOL not called). Let
+		// webdav.Handler return the proper 409 Conflict.
+		h.next.ServeHTTP(w, r)
+		return
+	}
+	tmpName := tmp.Name()
+
+	if _, err = io.Copy(tmp, r.Body); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	tmp.Close()
+
+	if err = os.Rename(tmpName, target); err != nil {
+		os.Remove(tmpName)
+		http.Error(w, "rename failed", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
 }
 
 // selfhostedClientURI builds the URI for clients connecting over the network.

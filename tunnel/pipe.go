@@ -415,7 +415,7 @@ func (p *Pipe) startReader() {
 						return
 					}
 				}
-				if err != nil || status == 404 || len(chunk) == 0 {
+				if err != nil || status == 404 || len(chunk) < 9 {
 					polled = true
 					wait := backoff
 					backoff *= 2
@@ -476,13 +476,10 @@ func (p *Pipe) startReader() {
 				}
 				delete(results, nextSeq)
 
-				if len(chunk) < 9 {
-					log.Printf("[%s] malformed chunk seq=%d len=%d", p.sessionID, nextSeq, len(chunk))
-					p.doneOnce.Do(func() { close(p.doneCh) })
-					return
-				}
 				ts := int64(binary.BigEndian.Uint64(chunk[1:9]))
-				p.recordLatency(time.Since(time.Unix(0, ts)))
+				if lat := time.Since(time.Unix(0, ts)); lat > 0 {
+					p.recordLatency(lat)
+				}
 
 				if chunk[0] == headerEOF {
 					close(p.readCh)
