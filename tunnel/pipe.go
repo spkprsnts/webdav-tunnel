@@ -378,6 +378,22 @@ func (p *Pipe) startWriter() {
 }
 
 func (p *Pipe) startReader() {
+	// Warn once if no chunk arrives within 30 s — helps diagnose a missing remote.
+	firstChunk := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-time.After(30 * time.Second):
+			select {
+			case <-firstChunk: // arrived just in time
+			default:
+				log.Printf("[%s] no data from %s in 30s — is the remote side running?",
+					p.sessionID, p.readDir)
+			}
+		case <-firstChunk:
+		case <-p.ctx.Done():
+		}
+	}()
+
 	type fetchResult struct {
 		seq    int64
 		data   []byte
@@ -468,6 +484,11 @@ func (p *Pipe) startReader() {
 				}
 			}
 
+			select {
+			case firstChunk <- struct{}{}:
+			default:
+			}
+
 			results[res.seq] = res.data
 			for {
 				chunk, ok := results[nextSeq]
@@ -531,6 +552,7 @@ func (p *Pipe) Read() ([]byte, error) {
 		}
 		return data, nil
 	case <-timer.C:
+		log.Printf("[%s] %s: idle for %v — remote disconnected or unreachable", p.sessionID, p.readDir, idleTimeout)
 		return nil, fmt.Errorf("idle timeout after %v", idleTimeout)
 	}
 }

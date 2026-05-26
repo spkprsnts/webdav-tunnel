@@ -101,8 +101,15 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 The `-uri` flag is a compact alternative to `-webdav`/`-login`/`-password` and tuning flags combined:
 
 ```
-webdav://user:pass@host:port[?tuning]    →  HTTP
-webdavs://user:pass@host:port[?tuning]   →  HTTPS (TLS)
+webdav://user:pass@host:port[?tuning][#name]    →  HTTP
+webdavs://user:pass@host:port[?tuning][#name]   →  HTTPS (TLS)
+```
+
+The optional `#name` fragment is a human-readable label for the configuration. It is never sent to the server and has no effect on the connection — UI clients can use it as a display name to distinguish saved configurations:
+
+```
+webdav://user:pass@1.2.3.4:8080?...#work-server
+webdavs://user:pass@vpn.example.com?...#home
 ```
 
 In selfhosted mode the server prints the URI with all its current tuning settings baked in as query parameters:
