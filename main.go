@@ -44,12 +44,13 @@ func main() {
 	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 
 	// Selfhosted: WebDAV is local, so use aggressive defaults for unset flags.
+	// Selfhosted: server polls its own localhost WebDAV, so faster intervals are safe.
+	// Concurrency stays at defaults — more parallel requests risk overwhelming
+	// the embedded filesystem-backed handler.
 	if *mode == "selfhosted" {
-		if !explicit["poll-max"]  { *pollMax      = 100 * time.Millisecond }
-		if !explicit["poll-min"]  { *pollMin      = 50 * time.Millisecond }
-		if !explicit["coalesce"]  { *coalesce     = 5 * time.Millisecond }
-		if !explicit["puts"]      { *puts         = 16 }
-		if !explicit["read-max"]  { *readAheadMax = 16 }
+		if !explicit["poll-max"] { *pollMax  = 200 * time.Millisecond }
+		if !explicit["poll-min"] { *pollMin  = 50 * time.Millisecond }
+		if !explicit["coalesce"] { *coalesce = 5 * time.Millisecond }
 	}
 
 	// Client with -uri: parse credentials and apply tuning from query params
@@ -93,6 +94,9 @@ func main() {
 	case "server":
 		requireWebDAVFlags(*webdavURL, *login, *password)
 		dav := dialWebDAV(*webdavURL, *login, *password, *timeout)
+		log.Printf("server: ════════════════════════════════════════════════════")
+		log.Printf("server: client -uri  %s", tunnel.ClientURI(*webdavURL, *login, *password))
+		log.Printf("server: ════════════════════════════════════════════════════")
 		tunnel.RunServer(dav, parseProxy(*proxyStr))
 
 	case "selfhosted":

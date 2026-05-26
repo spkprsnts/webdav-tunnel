@@ -128,7 +128,7 @@ webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -pol
 | `-login` | all | required | WebDAV username |
 | `-password` | all | required | WebDAV password |
 | `-timeout` | all | `60s` | HTTP request timeout |
-| `-poll-max` | all | `500ms` (selfhosted: `100ms`) | Maximum poll interval when idle |
+| `-poll-max` | all | `500ms` (selfhosted: `200ms`) | Maximum poll interval when idle |
 | `-poll-min` | all | `200ms` (selfhosted: `50ms`) | Starting poll interval, adaptive backoff |
 | `-coalesce` | all | `10ms` (selfhosted: `5ms`) | Write coalescing window |
 | `-chunk-size` | all | `131071` | Chunk size in bytes |

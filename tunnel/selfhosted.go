@@ -61,31 +61,57 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 		time.Sleep(100 * time.Millisecond)
 	}
 	log.Printf("selfhosted: embedded WebDAV ready at %s", localURL)
-	uri := clientURI(listenAddr, login, password, certFile != "")
-	log.Printf("selfhosted: ════════════════════════════════════════════════════")
-	log.Printf("selfhosted: client -uri  %s", uri)
-	log.Printf("selfhosted: ════════════════════════════════════════════════════")
+	scheme := "http"
+	if certFile != "" {
+		scheme = "https"
+	}
+	host, port, _ := net.SplitHostPort(listenAddr)
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "YOUR_SERVER_IP"
+	}
+	publicBase := fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
+	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password))
 
 	RunServer(dav, proxy)
 }
 
-// clientURI builds the webdav:// URI that clients pass to -uri.
-// Tuning parameters are embedded as query params so the client inherits them.
-// If the listen address binds to all interfaces, the host is replaced with
-// a placeholder the operator fills in with their actual public IP/hostname.
-func clientURI(listenAddr, login, password string, tls bool) string {
-	scheme := "webdav"
-	if tls {
-		scheme = "webdavs"
+// selfhostedClientURI builds the URI for clients connecting over the network.
+// Poll settings use network-safe defaults (server's fast local values would
+// be too aggressive for a remote client). Chunk/concurrency settings are
+// inherited from the current server configuration.
+func selfhostedClientURI(publicBase, login, password string) string {
+	u, _ := url.Parse(publicBase)
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "webdav"
+	case "https":
+		u.Scheme = "webdavs"
 	}
-	host, port, err := net.SplitHostPort(listenAddr)
-	if err != nil {
-		host = listenAddr
-		port = ""
+	u.User = url.UserPassword(login, password)
+	q := url.Values{}
+	q.Set("poll-min", "200ms")
+	q.Set("poll-max", "500ms")
+	q.Set("coalesce", "10ms")
+	q.Set("chunk-size", strconv.Itoa(ChunkDataSize))
+	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))
+	q.Set("read-min", strconv.Itoa(MinReadAheadWindow))
+	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// ClientURI converts an http/https WebDAV base URL into a webdav:// URI
+// with credentials and current tuning settings as query parameters.
+// Use this URI as the -uri flag value on the client.
+func ClientURI(baseURL, login, password string) string {
+	u, _ := url.Parse(baseURL)
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "webdav"
+	case "https":
+		u.Scheme = "webdavs"
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "YOUR_SERVER_IP"
-	}
+	u.User = url.UserPassword(login, password)
 	q := url.Values{}
 	q.Set("poll-min", MinPollInterval.String())
 	q.Set("poll-max", PollInterval.String())
@@ -94,13 +120,14 @@ func clientURI(listenAddr, login, password string, tls bool) string {
 	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))
 	q.Set("read-min", strconv.Itoa(MinReadAheadWindow))
 	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
-	u := &url.URL{
-		Scheme:   scheme,
-		User:     url.UserPassword(login, password),
-		Host:     net.JoinHostPort(host, port),
-		RawQuery: q.Encode(),
-	}
+	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func printClientURI(prefix, uri string) {
+	log.Printf("%s: ════════════════════════════════════════════════════", prefix)
+	log.Printf("%s: client -uri  %s", prefix, uri)
+	log.Printf("%s: ════════════════════════════════════════════════════", prefix)
 }
 
 // basicAuth wraps next with HTTP Basic authentication.
