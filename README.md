@@ -177,6 +177,10 @@ webdav-tunnel -mode server ... \
   -proxy socks5://user:pass@proxy.example.com:1080
 ```
 
+## Android client app
+
+[WireTurn](https://github.com/spkprsnts/WireTurn) is an Android app with a native UI that wraps the gomobile library above. It lets you connect to a webdav-tunnel server, manage saved configurations, and control the SOCKS5 proxy without the command line.
+
 ## Tuning
 
 Self-hosted mode automatically applies aggressive defaults (fast local disk, no rate limits). For external WebDAV on a low-latency server you can tune manually:
