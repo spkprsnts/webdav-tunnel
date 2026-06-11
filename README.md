@@ -42,6 +42,10 @@ Configure your browser or app to use `127.0.0.1:1080` as a SOCKS5 proxy.
 
 [WireTurn](https://github.com/spkprsnts/WireTurn) is an Android app that wraps this tunnel with a native UI — connect to a server, manage saved configurations, and control the SOCKS5 proxy without the command line.
 
+## Similar projects
+
+- [flowdav](https://github.com/lyafence/flowdav) — similar concept with multi-backend rotation and encrypted config files. **Not compatible** with webdav-tunnel: the two projects use different wire protocols and cannot be mixed (e.g. a webdav-tunnel client cannot connect to a flowdav server and vice versa).
+
 ## Documentation
 
 - [Modes](docs/modes.md) — selfhosted, external WebDAV, client URI format, advanced scenarios
