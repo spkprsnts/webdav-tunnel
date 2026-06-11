@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -438,7 +439,7 @@ func (p *Pipe) startReader() {
 				}
 				if needRetry {
 					polled = true
-					wait := backoff
+					wait := backoff + time.Duration(rand.Int63n(int64(backoff/2+1)))
 					backoff *= 2
 					if backoff > PollInterval {
 						backoff = PollInterval
