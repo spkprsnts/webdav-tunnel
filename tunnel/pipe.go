@@ -599,10 +599,12 @@ func (p *Pipe) recordLatency(d time.Duration) {
 	p.latCount++
 	now := time.Now()
 	if now.Sub(p.latLastLog) >= 10*time.Second {
-		avg := p.latSum / time.Duration(p.latCount)
-		log.Printf("[%s] ← %s latency: avg=%v max=%v chunks=%d",
-			p.sessionID, p.readDir,
-			avg.Round(time.Millisecond), p.latMax.Round(time.Millisecond), p.latCount)
+		if p.latCount >= 5 {
+			avg := p.latSum / time.Duration(p.latCount)
+			log.Printf("[%s] ← %s latency: avg=%v max=%v chunks=%d",
+				p.sessionID, p.readDir,
+				avg.Round(time.Millisecond), p.latMax.Round(time.Millisecond), p.latCount)
+		}
 		p.latMax = 0
 		p.latSum = 0
 		p.latCount = 0
