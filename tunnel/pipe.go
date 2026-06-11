@@ -42,6 +42,7 @@ type Pipe struct {
 	sessionID string
 	writeDir  string
 	readDir   string
+	encKey    []byte // nil = no encryption
 	writeSeq  atomic.Int64
 	readSeq   atomic.Int64
 	closed    atomic.Bool
@@ -68,13 +69,14 @@ type Pipe struct {
 	latLastLog time.Time
 }
 
-func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string) *Pipe {
+func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string, encKey []byte) *Pipe {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Pipe{
 		dav:       dav,
 		sessionID: sessionID,
 		writeDir:  writeDir,
 		readDir:   readDir,
+		encKey:    encKey,
 		ctx:       ctx,
 		cancel:    cancel,
 		doneCh:    make(chan struct{}),
@@ -290,6 +292,15 @@ func (p *Pipe) startWriter() {
 				defer p.wg.Done()
 				p.putSem <- struct{}{}
 				defer func() { <-p.putSem }()
+				if len(p.encKey) > 0 {
+					var encErr error
+					b, encErr = encryptChunk(p.encKey, b)
+					if encErr != nil {
+						log.Printf("[%s] encrypt seq=%d: %v", p.sessionID, s, encErr)
+						p.doneOnce.Do(func() { close(p.doneCh) })
+						return
+					}
+				}
 				path := p.chunkPath(p.writeDir, s)
 				writeDir := fmt.Sprintf("tunnel/%s/%s", p.sessionID, p.writeDir)
 				attempts := 0
@@ -415,7 +426,17 @@ func (p *Pipe) startReader() {
 						return
 					}
 				}
-				if err != nil || status == 404 || len(chunk) < 9 {
+				needRetry := err != nil || status == 404
+				if !needRetry {
+					if len(p.encKey) > 0 {
+						var decErr error
+						chunk, decErr = decryptChunk(p.encKey, chunk)
+						needRetry = decErr != nil || len(chunk) < 9
+					} else {
+						needRetry = len(chunk) < 9
+					}
+				}
+				if needRetry {
 					polled = true
 					wait := backoff
 					backoff *= 2

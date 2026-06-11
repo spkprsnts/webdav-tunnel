@@ -22,7 +22,7 @@ import (
 // Blocks indefinitely. Clients connect using:
 //
 //	-mode client -uri <printed-uri> -socks-listen 127.0.0.1:1080
-func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration) {
+func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration, encKey []byte) {
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		log.Fatalf("selfhosted: cannot create storage dir %q: %v", storageDir, err)
 	}
@@ -74,9 +74,9 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 		host = "YOUR_SERVER_IP"
 	}
 	publicBase := fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
-	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password))
+	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password, len(encKey) > 0))
 
-	RunServer(dav, proxy)
+	RunServer(dav, proxy, encKey)
 }
 
 // atomicPUTHandler intercepts PUT requests and writes via temp-file + rename,
@@ -126,7 +126,7 @@ func (h *atomicPUTHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Poll settings use network-safe defaults (server's fast local values would
 // be too aggressive for a remote client). Chunk/concurrency settings are
 // inherited from the current server configuration.
-func selfhostedClientURI(publicBase, login, password string) string {
+func selfhostedClientURI(publicBase, login, password string, enc bool) string {
 	u, _ := url.Parse(publicBase)
 	switch u.Scheme {
 	case "http":
@@ -143,6 +143,9 @@ func selfhostedClientURI(publicBase, login, password string) string {
 	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))
 	q.Set("read-min", strconv.Itoa(MinReadAheadWindow))
 	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
+	if enc {
+		q.Set("enc", "1")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -150,7 +153,7 @@ func selfhostedClientURI(publicBase, login, password string) string {
 // ClientURI converts an http/https WebDAV base URL into a webdav:// URI
 // with credentials and current tuning settings as query parameters.
 // Use this URI as the -uri flag value on the client.
-func ClientURI(baseURL, login, password string) string {
+func ClientURI(baseURL, login, password string, enc bool) string {
 	u, _ := url.Parse(baseURL)
 	switch u.Scheme {
 	case "http":
@@ -167,6 +170,9 @@ func ClientURI(baseURL, login, password string) string {
 	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))
 	q.Set("read-min", strconv.Itoa(MinReadAheadWindow))
 	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
+	if enc {
+		q.Set("enc", "1")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

@@ -14,7 +14,7 @@ import (
 
 // RunProxy starts the SOCKS5 proxy client. Blocks until ctx is cancelled.
 // Returns an error if the listener cannot be started.
-func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass string) error {
+func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass string, encKey []byte) error {
 	ensureTunnelDir(dav)
 
 	ln, err := net.Listen("tcp", listenAddr)
@@ -44,7 +44,7 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 			return nil
 		}
 		sid := newSessionID()
-		pipe := NewPipe(dav, sid, "c2s", "s2c")
+		pipe := NewPipe(dav, sid, "c2s", "s2c", encKey)
 		if err := pipe.Init(); err != nil {
 			log.Printf("[%s] pipe init failed: %v", sid, err)
 			select {
@@ -93,7 +93,7 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 }
 
 // RunServer polls for client sessions and handles them. Blocks indefinitely.
-func RunServer(dav *WebDAV, proxy *ProxyConfig) {
+func RunServer(dav *WebDAV, proxy *ProxyConfig, encKey []byte) {
 	ensureTunnelDir(dav)
 	log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
 	if proxy != nil {
@@ -140,7 +140,7 @@ func RunServer(dav *WebDAV, proxy *ProxyConfig) {
 				continue
 			}
 			go func(id string) {
-				serverMuxSession(dav, id, proxy)
+				serverMuxSession(dav, id, proxy, encKey)
 				mu.Lock()
 				if e, ok := known[id]; ok {
 					e.closedAt = time.Now()
@@ -217,7 +217,7 @@ func startupCleanup(dav *WebDAV) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			NewPipe(dav, id, "s2c", "c2s").SignalDone()
+			NewPipe(dav, id, "s2c", "c2s", nil).SignalDone()
 			dav.Delete(ctx, "tunnel/"+id+"/init")
 		}(sid)
 	}

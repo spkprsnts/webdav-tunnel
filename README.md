@@ -13,6 +13,7 @@ A TCP tunnel that uses any WebDAV server as a transport layer. Traffic is serial
 - The **client** exposes a local SOCKS5 proxy. Each incoming connection opens a [yamux](https://github.com/hashicorp/yamux) stream over a shared WebDAV pipe.
 - The **server** polls the same WebDAV storage, picks up sessions, and relays TCP traffic to the destination.
 - Data is split into numbered binary chunks stored as files. The reader uses adaptive polling and a read-ahead window to maximize throughput while staying within cloud rate limits.
+- Optionally, every chunk is encrypted with **AES-256-GCM** before upload — the WebDAV provider never sees plaintext data at rest.
 
 ## Requirements
 
@@ -47,6 +48,19 @@ selfhosted: ══════════════════════�
 selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=5ms&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
 selfhosted: ════════════════════════════════════════════════════
 ```
+
+To enable encryption, add `-enc`:
+
+```sh
+webdav-tunnel \
+  -mode selfhosted \
+  -webdav-listen :8080 \
+  -login myuser \
+  -password mypass \
+  -enc
+```
+
+The printed URI will contain `&enc=1` — the client picks it up automatically, no extra flags needed.
 
 Replace `YOUR_SERVER_IP` with the server's public IP or hostname.
 
@@ -84,6 +98,14 @@ webdav-tunnel \
   -password <password>
 ```
 
+The server prints a client URI. With `-enc` the URI will include `&enc=1` so the client enables encryption automatically:
+
+```sh
+webdav-tunnel -mode server -enc \
+  -webdav https://dav.example.com -login user -password <password>
+# server: client -uri  webdav://user:<password>@dav.example.com?enc=1&...
+```
+
 **Client (SOCKS5 proxy):**
 ```sh
 webdav-tunnel \
@@ -115,8 +137,10 @@ webdavs://user:pass@vpn.example.com?...#home
 In selfhosted mode the server prints the URI with all its current tuning settings baked in as query parameters:
 
 ```
-webdav://user:pass@1.2.3.4:8080?chunk-size=131071&coalesce=5ms&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
+webdav://user:pass@1.2.3.4:8080?chunk-size=131071&coalesce=5ms&enc=1&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
 ```
+
+The `enc=1` parameter is included when the server was started with `-enc`.
 
 The client applies these values for any tuning flag not explicitly set on the command line. An explicit flag always wins:
 
@@ -130,6 +154,7 @@ webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -pol
 | Flag | Mode | Default | Description |
 |------|------|---------|-------------|
 | `-mode` | — | required | `client`, `server`, or `selfhosted` |
+| `-enc` | all | `false` | Encrypt chunk data with AES-256-GCM (key derived from WebDAV password) |
 | `-uri` | client | — | Connection URI (`webdav://user:pass@host:port`), replaces `-webdav`/`-login`/`-password` |
 | `-webdav` | client, server | required | WebDAV base URL |
 | `-login` | all | required | WebDAV username |
@@ -150,6 +175,28 @@ webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -pol
 | `-webdav-storage` | selfhosted | `webdav-data` | Directory for session data |
 | `-webdav-tls-cert` | selfhosted | — | TLS certificate file |
 | `-webdav-tls-key` | selfhosted | — | TLS key file |
+
+## Encryption
+
+By default, chunk files on the WebDAV server are stored as plaintext — traffic is protected by TLS in transit but the provider can read the data at rest. The `-enc` flag enables end-to-end encryption of every chunk:
+
+```sh
+# server
+webdav-tunnel -mode server -enc -webdav https://... -login user -password pass
+
+# client (copy the URI printed by the server — enc=1 is already inside)
+webdav-tunnel -mode client -uri "webdav://user:pass@...?enc=1&..." -socks-listen 127.0.0.1:1080
+```
+
+**How it works:**
+
+- The 256-bit AES key is derived from the WebDAV password using SHA-256 with a fixed domain prefix (`webdav-tunnel-v1:`). No separate key material is needed.
+- Each chunk is encrypted with **AES-256-GCM** and a fresh random 12-byte nonce. Authentication (HMAC) is provided by GCM natively.
+- The overhead is 28 bytes per chunk (12 nonce + 16 GCM tag) — negligible on 128 KB chunks.
+- Control files (`init`, `hb`, `done`, `srv-hb`) are not encrypted; they contain only timestamps and short status tokens.
+- Both sides must use the same WebDAV password. The server automatically includes `enc=1` in the printed client URI so there is no extra configuration step on the client.
+
+> **Note:** If encryption is enabled on the server but not on the client (or vice versa), the client will see decryption failures and keep retrying until the session times out. Make sure both sides have `-enc` set, or use the URI printed by the server.
 
 ## Advanced scenarios
 
@@ -218,6 +265,9 @@ import mobile.Mobile
 Mobile.setPollMinMs(50)
 Mobile.setChunkSize(1048575)
 
+// enable encryption (call before Start; pass the same WebDAV password)
+Mobile.setEncrypt("pass")
+
 // start the SOCKS5 proxy on localhost:1080
 Mobile.start("https://dav.example.com", "user", "pass", "127.0.0.1:1080", "", "")
 
@@ -244,3 +294,4 @@ the proxy) resolve names through the tunnel without any additional setup.
 - App passwords are recommended over the main account password where supported by the WebDAV provider.
 - The server cleans up stale sessions on startup and removes chunk files as they are consumed.
 - IPv4 is preferred over IPv6 on the server side to avoid connection hangs on hosts without IPv6 connectivity.
+- When `-enc` is used, the encryption key is derived from the WebDAV password. Changing the password invalidates the key — update both sides together.

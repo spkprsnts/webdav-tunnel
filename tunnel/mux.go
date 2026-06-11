@@ -313,7 +313,7 @@ func relayDNS(pc net.PacketConn, clientAddr net.Addr, mux *yamux.Session, host s
 // ── server: yamux server ──────────────────────────────────────────────────────
 
 // serverMuxSession creates a yamux session over a WebDAV pipe and accepts streams.
-func serverMuxSession(dav *WebDAV, sid string, proxy *ProxyConfig) {
+func serverMuxSession(dav *WebDAV, sid string, proxy *ProxyConfig, encKey []byte) {
 	if age := dav.SessionAge(context.Background(), sid); age > StaleSessionAge {
 		log.Printf("[%s] stale session (%v old), removing", sid, age.Round(time.Second))
 		// Delete init first so ListSessions stops seeing the session immediately,
@@ -323,7 +323,7 @@ func serverMuxSession(dav *WebDAV, sid string, proxy *ProxyConfig) {
 		return
 	}
 
-	pipe := NewPipe(dav, sid, "s2c", "c2s")
+	pipe := NewPipe(dav, sid, "s2c", "c2s", encKey)
 
 	// Signal to the client that this session has been picked up.
 	dav.Put(context.Background(), "tunnel/"+sid+"/srv-hb",

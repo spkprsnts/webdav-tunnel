@@ -29,6 +29,7 @@ func main() {
 	webdavTLSCert := flag.String("webdav-tls-cert", "", "TLS certificate file (selfhosted mode, optional)")
 	webdavTLSKey  := flag.String("webdav-tls-key", "", "TLS key file (selfhosted mode, optional)")
 
+	encrypt      := flag.Bool("enc", false, "encrypt tunnel data with AES-256-GCM (key derived from WebDAV password)")
 	pollMax      := flag.Duration("poll-max", tunnel.PollInterval, "maximum poll interval when idle")
 	pollMin      := flag.Duration("poll-min", tunnel.MinPollInterval, "starting poll interval (adaptive backoff)")
 	coalesce     := flag.Duration("coalesce", tunnel.CoalesceDelay, "write coalescing window")
@@ -65,6 +66,7 @@ func main() {
 		if v := parseIntParam(q, "puts");      v != nil && !explicit["puts"]        { *puts        = *v }
 		if v := parseIntParam(q, "read-min");  v != nil && !explicit["read-min"]    { *readAheadMin = *v }
 		if v := parseIntParam(q, "read-max");  v != nil && !explicit["read-max"]    { *readAheadMax = *v }
+		if q.Get("enc") == "1"               && !explicit["enc"]                    { *encrypt      = true }
 	}
 
 	tunnel.PollInterval       = *pollMax
@@ -74,6 +76,12 @@ func main() {
 	tunnel.MaxConcurrentPuts  = *puts
 	tunnel.MinReadAheadWindow = *readAheadMin
 	tunnel.MaxReadAheadWindow = *readAheadMax
+
+	var encKey []byte
+	if *encrypt {
+		encKey = tunnel.DeriveKey(*password)
+		log.Printf("encryption: enabled (AES-256-GCM, key derived from WebDAV password)")
+	}
 
 	switch *mode {
 	case "client":
@@ -87,7 +95,7 @@ func main() {
 		if *socksUser != "" {
 			log.Printf("SOCKS5 auth enabled for user %q", *socksUser)
 		}
-		if err := tunnel.RunProxy(context.Background(), dav, *listen, *socksUser, *socksPass); err != nil {
+		if err := tunnel.RunProxy(context.Background(), dav, *listen, *socksUser, *socksPass, encKey); err != nil {
 			log.Fatalf("proxy: %v", err)
 		}
 
@@ -95,9 +103,9 @@ func main() {
 		requireWebDAVFlags(*webdavURL, *login, *password)
 		dav := dialWebDAV(*webdavURL, *login, *password, *timeout)
 		log.Printf("server: ════════════════════════════════════════════════════")
-		log.Printf("server: client -uri  %s", tunnel.ClientURI(*webdavURL, *login, *password))
+		log.Printf("server: client -uri  %s", tunnel.ClientURI(*webdavURL, *login, *password, *encrypt))
 		log.Printf("server: ════════════════════════════════════════════════════")
-		tunnel.RunServer(dav, parseProxy(*proxyStr))
+		tunnel.RunServer(dav, parseProxy(*proxyStr), encKey)
 
 	case "selfhosted":
 		if *login == "" || *password == "" {
@@ -106,7 +114,7 @@ func main() {
 		if *webdavListen == "" {
 			log.Fatal("-webdav-listen required for selfhosted mode (e.g., :8080)")
 		}
-		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout)
+		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout, encKey)
 
 	default:
 		log.Fatal("-mode must be: client | server | selfhosted")

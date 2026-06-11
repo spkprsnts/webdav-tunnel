@@ -21,6 +21,7 @@ import (
 var (
 	running  atomic.Bool
 	cancelFn context.CancelFunc
+	encKey   []byte
 )
 
 // Start starts the WebDAV SOCKS5 tunnel client.
@@ -50,7 +51,7 @@ func Start(webdavURL, login, password, socksListen, socksUser, socksPass string)
 
 	go func() {
 		defer running.Store(false)
-		if err := tunnel.RunProxy(ctx, dav, socksListen, socksUser, socksPass); err != nil {
+		if err := tunnel.RunProxy(ctx, dav, socksListen, socksUser, socksPass, encKey); err != nil {
 			log.Printf("tunnel proxy error: %v", err)
 		}
 	}()
@@ -95,4 +96,12 @@ func SetReadAheadMin(n int) { tunnel.MinReadAheadWindow = n }
 
 // SetReadAheadMax sets the maximum concurrent prefetch GETs (default 8).
 func SetReadAheadMax(n int) { tunnel.MaxReadAheadWindow = n }
+
+// SetEncrypt enables AES-256-GCM encryption of tunnel data.
+// The key is derived from the WebDAV password, so both client and server
+// must use the same password. Call before Start().
+func SetEncrypt(password string) { encKey = tunnel.DeriveKey(password) }
+
+// ClearEncrypt disables encryption (default). Call before Start().
+func ClearEncrypt() { encKey = nil }
 
