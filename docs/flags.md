@@ -2,6 +2,7 @@
 
 | Flag | Mode | Default | Description |
 |------|------|---------|-------------|
+| `-version` | — | — | Print the version and exit |
 | `-mode` | — | required | `client`, `server`, or `selfhosted` |
 | `-config` | all | — | Path to a YAML config file ([docs/config.md](config.md)); the way to declare multiple WebDAV backends. CLI flags override its values |
 | `-uri` | client | — | Connection URI (`webdav://user:pass@host:port`), replaces `-webdav`/`-login`/`-password` and tuning flags |

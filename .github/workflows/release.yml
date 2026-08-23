@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify (gofmt, vet, test, build)
+        run: |
+          fmt=$(gofmt -l .)
+          if [ -n "$fmt" ]; then
+            echo "gofmt needed on:"
+            echo "$fmt"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go build ./...
+
+      - name: Install svu
+        run: go install github.com/caarlos0/svu/v3@latest
+
+      - name: Compute next version
+        id: version
+        run: |
+          current=$(svu current)
+          next=$(svu next)
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$next" ]; then
+            echo "No release-worthy commits since $current — skipping release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $current -> $next"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag
+        if: steps.version.outputs.release == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.next }}" -m "Release ${{ steps.version.outputs.next }}"
+          git push origin "${{ steps.version.outputs.next }}"
+
+      - name: GoReleaser
+        if: steps.version.outputs.release == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

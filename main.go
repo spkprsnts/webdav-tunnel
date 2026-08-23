@@ -13,7 +13,12 @@ import (
 	"webdav-tunnel/tunnel"
 )
 
+// version is set at build time via -ldflags "-X main.version=vX.Y.Z"
+// (see .goreleaser.yaml). Left as "dev" for local `go build`.
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	mode := flag.String("mode", "", "client | server | selfhosted")
 	configPath := flag.String("config", "", "path to a YAML config file (see docs/config.md); CLI flags override config values")
 	uriFlag := flag.String("uri", "", "client connection URI: webdav://user:pass@host:port[?tuning] (replaces -webdav/-login/-password and tuning flags)")
@@ -43,6 +48,11 @@ func main() {
 	readAheadMin := flag.Int("read-min", tunnel.MinReadAheadWindow, "minimum concurrent prefetch GETs")
 	readAheadMax := flag.Int("read-max", tunnel.MaxReadAheadWindow, "maximum concurrent prefetch GETs")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("webdav-tunnel " + version)
+		return
+	}
 
 	// Track which flags the user set explicitly on the command line — used
 	// below to decide whether config values, selfhosted defaults, or URI
