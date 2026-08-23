@@ -3,6 +3,17 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: >-
+          Force this version bump regardless of commit messages since the
+          last tag (e.g. if a release-worthy change was committed with the
+          wrong Conventional Commits prefix). Leave as "auto" for the normal
+          commit-message-based detection.
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
 
 permissions:
   contents: write
@@ -41,9 +52,14 @@ jobs:
 
       - name: Compute next version
         id: version
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'auto' }}
         run: |
           current=$(svu current)
-          next=$(svu next)
+          case "$BUMP" in
+            patch|minor|major) next=$(svu "$BUMP") ;;
+            *)                 next=$(svu next) ;;
+          esac
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "next=$next" >> "$GITHUB_OUTPUT"
           if [ "$current" = "$next" ]; then

@@ -31,6 +31,17 @@ deliberately:
 
 ## Manual releases
 
-There isn't a manual trigger by design — the whole point is that release
-timing follows what actually merged to `main`. To release right now, merge
-a release-worthy commit to `main`; to hold off, don't merge one.
+Normally you don't need this — release timing just follows what merged to
+`main`. But if a release-worthy change got committed with the wrong prefix
+(e.g. a bug fix committed as `docs:` by mistake) and `auto` detection sees
+nothing to release, you can force one:
+
+1. GitHub → **Actions** → **Release** → **Run workflow**.
+2. Pick a **bump**: `patch`, `minor`, or `major` (instead of the default `auto`).
+3. Run it on `main`.
+
+This skips commit-message detection entirely and tags/releases whatever is
+currently on `main` with that bump, using the exact same build-and-publish
+steps as an automatic release (still gated on tests passing first).
+
+Equivalent from the CLI: `gh workflow run release.yml -f bump=patch`.
