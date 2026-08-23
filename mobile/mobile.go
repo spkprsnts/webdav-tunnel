@@ -100,9 +100,17 @@ func SetReadAheadMin(n int) { tunnel.MinReadAheadWindow = n }
 func SetReadAheadMax(n int) { tunnel.MaxReadAheadWindow = n }
 
 // SetEncrypt enables AES-256-GCM encryption of tunnel data.
-// The key is derived from the WebDAV password, so both client and server
-// must use the same password. Call before Start().
-func SetEncrypt(password string) { encKey = tunnel.DeriveKey(password) }
+// The key is derived from the WebDAV login and password (via scrypt), so
+// both client and server must use the same login+password. Call before
+// Start(), with the same login/password values passed to it.
+func SetEncrypt(login, password string) error {
+	key, err := tunnel.DeriveKey(login, password)
+	if err != nil {
+		return err
+	}
+	encKey = key
+	return nil
+}
 
 // ClearEncrypt disables encryption (default). Call before Start().
 func ClearEncrypt() { encKey = nil }

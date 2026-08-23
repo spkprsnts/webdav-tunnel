@@ -162,8 +162,12 @@ func main() {
 		}
 		var encKey []byte
 		if *encrypt {
-			encKey = tunnel.DeriveKey(*password)
-			log.Printf("encryption: enabled (AES-256-GCM, key derived from WebDAV password)")
+			var err error
+			encKey, err = tunnel.DeriveKey(*login, *password)
+			if err != nil {
+				log.Fatalf("derive encryption key: %v", err)
+			}
+			log.Printf("encryption: enabled (AES-256-GCM, key derived from WebDAV login+password via scrypt)")
 		}
 		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout, encKey)
 
@@ -335,11 +339,15 @@ func requireWebDAVFlags(webdavURL, login, password string) {
 }
 
 // newBackend builds one pool backend, deriving its encryption key (if any)
-// from its own WebDAV password.
+// from its own WebDAV login and password.
 func newBackend(label, rawURL, login, password string, timeout time.Duration, encrypt bool) *tunnel.Backend {
 	var key []byte
 	if encrypt {
-		key = tunnel.DeriveKey(password)
+		var err error
+		key, err = tunnel.DeriveKey(login, password)
+		if err != nil {
+			log.Fatalf("derive encryption key for backend %s: %v", label, err)
+		}
 	}
 	return &tunnel.Backend{
 		Label:  label,
