@@ -26,6 +26,7 @@ socks-pass: secret
 enc: true
 timeout: 60s
 proxy: socks5://user:pass@host:port
+dns: 1.1.1.1:53   # resolve the WebDAV backend hostname with this server instead of the OS resolver
 
 # Single-backend shorthand — equivalent to -webdav/-login/-password.
 # Ignored if `backends` below is non-empty.
@@ -61,6 +62,16 @@ webdav-tls-key: ""
 
 See [config.example.yaml](../config.example.yaml) for a minimal working
 example.
+
+## DNS resolution
+
+`-dns` (or `dns:` in the config) only controls how the **WebDAV backend's own
+hostname** is resolved — useful when the client's default/OS DNS is
+unreliable, filtered, or blocked, but the backend (e.g. `webdav.yandex.ru`)
+still needs to be reachable. It has nothing to do with the SOCKS5-tunneled
+traffic: destination hostnames for proxied connections are always resolved
+**server-side**, never on the client, regardless of this setting. See
+[modes.md](modes.md) and `tunnel/mux.go`'s `dialTarget` for that path.
 
 ## Multi-backend rotation
 

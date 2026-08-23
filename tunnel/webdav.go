@@ -45,12 +45,31 @@ type WebDAV struct {
 	client   *http.Client
 }
 
-func NewWebDAV(baseURL, login, password string, timeout time.Duration) *WebDAV {
+// NewWebDAV creates a WebDAV client. dnsServer, if non-empty (e.g.
+// "1.1.1.1:53"), overrides the OS resolver for looking up baseURL's
+// hostname — useful when the client's default DNS is blocked, filtered, or
+// otherwise cannot resolve the WebDAV backend. A missing port defaults to
+// 53. This only affects resolving the backend itself; it has no effect on
+// how the SOCKS5-tunneled traffic's destinations are resolved (that always
+// happens server-side, in dialTarget).
+func NewWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer string) *WebDAV {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 15 * time.Second,
+	}
+	if dnsServer != "" {
+		if _, _, err := net.SplitHostPort(dnsServer); err != nil {
+			dnsServer = net.JoinHostPort(dnsServer, "53")
+		}
+		dialer.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, dnsServer)
+			},
+		}
+	}
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 15 * time.Second,
-		}).DialContext,
+		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     false, // HTTP/2 disabled: some cloud providers throttle or fingerprint bot HTTP/2 traffic
 		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 		TLSHandshakeTimeout:   15 * time.Second,

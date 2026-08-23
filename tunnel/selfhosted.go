@@ -55,7 +55,7 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 	}()
 
 	localURL := buildLocalURL(listenAddr, certFile != "")
-	dav := NewWebDAV(localURL, login, password, timeout)
+	dav := NewWebDAV(localURL, login, password, timeout, "") // always localhost — no external DNS needed
 
 	ctx := context.Background()
 	for i := 0; i < 20; i++ {

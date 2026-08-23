@@ -19,6 +19,7 @@ type Config struct {
 	Enc         bool      `yaml:"enc"`
 	Timeout     *Duration `yaml:"timeout"`
 	Proxy       string    `yaml:"proxy"`
+	DNS         string    `yaml:"dns"`
 
 	// Single-backend shorthand — ignored if Backends is non-empty.
 	Webdav   string `yaml:"webdav"`

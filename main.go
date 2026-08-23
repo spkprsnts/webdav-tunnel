@@ -25,6 +25,7 @@ func main() {
 	socksPass := flag.String("socks-pass", "", "SOCKS5 proxy password (client mode, optional)")
 	proxyStr := flag.String("proxy", "", "upstream SOCKS5 proxy for the server: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "HTTP request timeout")
+	dnsServer := flag.String("dns", "", "DNS server to resolve WebDAV backend hostnames with, e.g. 1.1.1.1:53 (default: OS resolver). Only affects reaching the backend itself, not SOCKS5-tunneled traffic")
 
 	// selfhosted mode
 	webdavListen := flag.String("webdav-listen", "", "address:port for the embedded WebDAV server (selfhosted mode), e.g. :8080")
@@ -59,7 +60,7 @@ func main() {
 		applyConfig(cfg, explicit, configFlags{
 			mode: mode, webdavURL: webdavURL, login: login, password: password,
 			listen: listen, socksUser: socksUser, socksPass: socksPass, proxyStr: proxyStr,
-			timeout: timeout, encrypt: encrypt,
+			timeout: timeout, encrypt: encrypt, dnsServer: dnsServer,
 			webdavListen: webdavListen, webdavStorage: webdavStorage,
 			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey,
 			pollMin: pollMin, pollMax: pollMax, coalesce: coalesce,
@@ -135,7 +136,7 @@ func main() {
 		if *listen == "" {
 			log.Fatal("-socks-listen required for client mode")
 		}
-		pool := buildPool(cfgBackends, *webdavURL, *login, *password, *timeout, *encrypt)
+		pool := buildPool(cfgBackends, *webdavURL, *login, *password, *dnsServer, *timeout, *encrypt)
 		if *socksUser != "" {
 			log.Printf("SOCKS5 auth enabled for user %q", *socksUser)
 		}
@@ -147,7 +148,7 @@ func main() {
 		if len(cfgBackends) == 0 {
 			requireWebDAVFlags(*webdavURL, *login, *password)
 		}
-		pool := buildPool(cfgBackends, *webdavURL, *login, *password, *timeout, *encrypt)
+		pool := buildPool(cfgBackends, *webdavURL, *login, *password, *dnsServer, *timeout, *encrypt)
 		log.Printf("server: ════════════════════════════════════════════════════")
 		log.Printf("server: client -uri  %s", serverClientURI(cfgBackends, *webdavURL, *login, *password, *encrypt))
 		log.Printf("server: ════════════════════════════════════════════════════")
@@ -180,6 +181,7 @@ func main() {
 type configFlags struct {
 	mode, webdavURL, login, password            *string
 	listen, socksUser, socksPass, proxyStr      *string
+	dnsServer                                   *string
 	timeout                                     *time.Duration
 	encrypt                                     *bool
 	webdavListen, webdavStorage                 *string
@@ -206,6 +208,7 @@ func applyConfig(cfg *Config, explicit map[string]bool, f configFlags) {
 	setStr(f.socksUser, "socks-user", cfg.SocksUser)
 	setStr(f.socksPass, "socks-pass", cfg.SocksPass)
 	setStr(f.proxyStr, "proxy", cfg.Proxy)
+	setStr(f.dnsServer, "dns", cfg.DNS)
 	setStr(f.webdavListen, "webdav-listen", cfg.WebdavListen)
 	setStr(f.webdavStorage, "webdav-storage", cfg.WebdavStorage)
 	setStr(f.webdavTLSCert, "webdav-tls-cert", cfg.WebdavTLSCert)
@@ -340,7 +343,7 @@ func requireWebDAVFlags(webdavURL, login, password string) {
 
 // newBackend builds one pool backend, deriving its encryption key (if any)
 // from its own WebDAV login and password.
-func newBackend(label, rawURL, login, password string, timeout time.Duration, encrypt bool) *tunnel.Backend {
+func newBackend(label, rawURL, login, password, dnsServer string, timeout time.Duration, encrypt bool) *tunnel.Backend {
 	var key []byte
 	if encrypt {
 		var err error
@@ -351,7 +354,7 @@ func newBackend(label, rawURL, login, password string, timeout time.Duration, en
 	}
 	return &tunnel.Backend{
 		Label:  label,
-		Dav:    tunnel.NewWebDAV(rawURL, login, password, timeout),
+		Dav:    tunnel.NewWebDAV(rawURL, login, password, timeout, dnsServer),
 		EncKey: key,
 	}
 }
@@ -361,7 +364,7 @@ func newBackend(label, rawURL, login, password string, timeout time.Duration, en
 // (or -uri-derived) backend. It pings every backend in parallel and only
 // fails hard if none of them are reachable — a dead backend shouldn't block
 // startup when others are available.
-func buildPool(backendsCfg []BackendConfig, webdavURL, login, password string, timeout time.Duration, encrypt bool) *tunnel.BackendPool {
+func buildPool(backendsCfg []BackendConfig, webdavURL, login, password, dnsServer string, timeout time.Duration, encrypt bool) *tunnel.BackendPool {
 	var backends []*tunnel.Backend
 	if len(backendsCfg) > 0 {
 		for i, bc := range backendsCfg {
@@ -369,10 +372,10 @@ func buildPool(backendsCfg []BackendConfig, webdavURL, login, password string, t
 			if label == "" {
 				label = fmt.Sprintf("backend-%d", i+1)
 			}
-			backends = append(backends, newBackend(label, bc.URL, bc.Login, bc.Password, timeout, encrypt))
+			backends = append(backends, newBackend(label, bc.URL, bc.Login, bc.Password, dnsServer, timeout, encrypt))
 		}
 	} else {
-		backends = append(backends, newBackend(webdavURL, webdavURL, login, password, timeout, encrypt))
+		backends = append(backends, newBackend(webdavURL, webdavURL, login, password, dnsServer, timeout, encrypt))
 	}
 
 	pool := tunnel.NewBackendPool(backends)

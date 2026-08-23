@@ -19,9 +19,10 @@ import (
 )
 
 var (
-	running  atomic.Bool
-	cancelFn context.CancelFunc
-	encKey   []byte
+	running   atomic.Bool
+	cancelFn  context.CancelFunc
+	encKey    []byte
+	dnsServer string
 )
 
 // Start starts the WebDAV SOCKS5 tunnel client.
@@ -37,7 +38,7 @@ func Start(webdavURL, login, password, socksListen, socksUser, socksPass string)
 		return errors.New("tunnel already running")
 	}
 
-	dav := tunnel.NewWebDAV(webdavURL, login, password, 60*time.Second)
+	dav := tunnel.NewWebDAV(webdavURL, login, password, 60*time.Second, dnsServer)
 
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer pingCancel()
@@ -114,3 +115,13 @@ func SetEncrypt(login, password string) error {
 
 // ClearEncrypt disables encryption (default). Call before Start().
 func ClearEncrypt() { encKey = nil }
+
+// SetDNSServer overrides the DNS server used to resolve the WebDAV backend's
+// hostname, e.g. "1.1.1.1:53" — useful when the device's default DNS is
+// blocked or filtered. Only affects reaching the backend itself; it has no
+// effect on how SOCKS5-tunneled traffic's destinations are resolved (that
+// always happens server-side). Call before Start().
+func SetDNSServer(addr string) { dnsServer = addr }
+
+// ClearDNSServer reverts to the OS resolver (default). Call before Start().
+func ClearDNSServer() { dnsServer = "" }

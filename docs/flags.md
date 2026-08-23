@@ -14,6 +14,7 @@
 | `-socks-user` | client | — | SOCKS5 proxy username |
 | `-socks-pass` | client | — | SOCKS5 proxy password |
 | `-proxy` | server, selfhosted | — | Upstream SOCKS5 proxy: `socks5://[user:pass@]host:port` |
+| `-dns` | client, server | — | DNS server to resolve WebDAV backend hostnames with, e.g. `1.1.1.1:53` (default: OS resolver). Only affects reaching the backend itself — SOCKS5-tunneled traffic is always resolved server-side, never locally |
 | `-webdav-listen` | selfhosted | required | Address for the embedded WebDAV server (e.g. `:8080`) |
 | `-webdav-storage` | selfhosted | `webdav-data` | Directory for session data |
 | `-webdav-tls-cert` | selfhosted | — | TLS certificate file |
