@@ -17,36 +17,108 @@ import (
 	"golang.org/x/net/webdav"
 )
 
-// RunSelfHosted starts an embedded WebDAV server on listenAddr, stores all
-// session data in storageDir, and then runs the tunnel server loop against it.
-// Blocks indefinitely. Clients connect using:
+// SelfHostedBackend describes one embedded WebDAV listener for -mode selfhosted.
+type SelfHostedBackend struct {
+	ListenAddr string
+	StorageDir string
+	Login      string
+	Password   string
+	CertFile   string // optional, built-in TLS
+	KeyFile    string
+}
+
+// RunSelfHosted starts one embedded WebDAV server per entry in backends. If
+// storageOnly is false (the default), it then runs a single tunnel relay
+// (RunServer) polling all of them, rotating new sessions across them —
+// exactly like an external `-mode server` with a backends: list would, but
+// as one process from one config. Blocks indefinitely. Clients connect
+// using the printed:
 //
 //	-mode client -uri <printed-uri> -socks-listen 127.0.0.1:1080
-func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration, encKey []byte, healthListen string) {
-	if err := os.MkdirAll(storageDir, 0o755); err != nil {
-		log.Fatalf("selfhosted: cannot create storage dir %q: %v", storageDir, err)
+//
+// Running several backends from one process (this) is the simple way to
+// use self-hosted multi-backend rotation without managing separate
+// processes — but they share fate: if this process or its machine goes
+// down, every backend goes with it. For resilience against that, run each
+// backend as its own storageOnly process (each on its own machine) behind a
+// separate external `-mode server -config ...` that lists all of them —
+// see docs/config.md#multi-backend-rotation.
+//
+// If storageOnly is true, no relay is started here at all — the backends
+// only serve WebDAV storage, for an external server to poll. Don't point a
+// client directly at a storage-only node (via -uri): there's no relay
+// there to pick up its sessions. And never point both a storage-only
+// node's own relay and an external one at the same storage simultaneously
+// — storageOnly exists precisely to prevent that double-relay conflict.
+func RunSelfHosted(backends []SelfHostedBackend, proxy *ProxyConfig, timeout time.Duration, encrypt bool, healthListen string, storageOnly bool) {
+	if encrypt {
+		log.Printf("encryption: enabled (AES-256-GCM, key derived per backend from its own login+password via scrypt)")
+	}
+
+	var poolBackends []*Backend
+	var refs []BackendRef
+	for _, b := range backends {
+		dav, publicBase := startEmbeddedWebDAV(b, timeout)
+
+		var key []byte
+		if encrypt {
+			var err error
+			key, err = DeriveKey(b.Login, b.Password)
+			if err != nil {
+				log.Fatalf("selfhosted: derive encryption key for %s: %v", publicBase, err)
+			}
+		}
+
+		if storageOnly {
+			log.Printf("selfhosted: %s ready (storage-only) — add as a backend:  url: %s  login: %s  password: %s",
+				publicBase, publicBase, b.Login, b.Password)
+		}
+
+		poolBackends = append(poolBackends, &Backend{Label: publicBase, Dav: dav, EncKey: key})
+		refs = append(refs, BackendRef{URL: publicBase, Login: b.Login, Password: b.Password})
+	}
+
+	if storageOnly {
+		select {} // serve WebDAV forever; no relay loop
+	}
+
+	primary, extra := refs[0], refs[1:]
+	printClientURI("selfhosted", selfhostedClientURI(primary.URL, primary.Login, primary.Password, encrypt, extra))
+
+	pool := NewBackendPool(poolBackends)
+	RunServer(pool, proxy, healthListen)
+}
+
+// startEmbeddedWebDAV starts one embedded WebDAV HTTP server for b and
+// blocks until it responds. Returns a *WebDAV client that reaches it via
+// localhost (used internally by the relay) and its externally-reachable
+// base URL (for the printed client URI / storage-only banner — host
+// defaults to YOUR_SERVER_IP for a wildcard bind).
+func startEmbeddedWebDAV(b SelfHostedBackend, timeout time.Duration) (dav *WebDAV, publicBase string) {
+	if err := os.MkdirAll(b.StorageDir, 0o755); err != nil {
+		log.Fatalf("selfhosted: cannot create storage dir %q: %v", b.StorageDir, err)
 	}
 
 	wdHandler := &webdav.Handler{
-		FileSystem: webdav.Dir(storageDir),
+		FileSystem: webdav.Dir(b.StorageDir),
 		LockSystem: webdav.NewMemLS(),
 	}
 
 	// Wrap with atomic PUT handler to prevent concurrent GET seeing a partial write.
 	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           basicAuth(login, password, &atomicPUTHandler{storageDir: storageDir, next: wdHandler}),
+		Addr:              b.ListenAddr,
+		Handler:           basicAuth(b.Login, b.Password, &atomicPUTHandler{storageDir: b.StorageDir, next: wdHandler}),
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
 		var err error
-		if certFile != "" && keyFile != "" {
-			log.Printf("selfhosted: WebDAV listening (TLS) on %s", listenAddr)
-			err = srv.ListenAndServeTLS(certFile, keyFile)
+		if b.CertFile != "" && b.KeyFile != "" {
+			log.Printf("selfhosted: WebDAV listening (TLS) on %s", b.ListenAddr)
+			err = srv.ListenAndServeTLS(b.CertFile, b.KeyFile)
 		} else {
-			log.Printf("selfhosted: WebDAV listening on %s", listenAddr)
+			log.Printf("selfhosted: WebDAV listening on %s", b.ListenAddr)
 			err = srv.ListenAndServe()
 		}
 		if err != nil && err != http.ErrServerClosed {
@@ -54,30 +126,32 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 		}
 	}()
 
-	localURL := buildLocalURL(listenAddr, certFile != "")
-	dav := NewWebDAV(localURL, login, password, timeout, "") // always localhost — no external DNS needed
+	localURL := buildLocalURL(b.ListenAddr, b.CertFile != "")
+	dav = NewWebDAV(localURL, b.Login, b.Password, timeout, "") // no external DNS needed — see buildLocalURL
 
 	ctx := context.Background()
+	var pingErr error
 	for i := 0; i < 20; i++ {
-		if err := dav.Ping(ctx); err == nil {
+		if pingErr = dav.Ping(ctx); pingErr == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if pingErr != nil {
+		log.Fatalf("selfhosted: embedded WebDAV at %s never became reachable: %v", localURL, pingErr)
+	}
 	log.Printf("selfhosted: embedded WebDAV ready at %s", localURL)
+
 	scheme := "http"
-	if certFile != "" {
+	if b.CertFile != "" {
 		scheme = "https"
 	}
-	host, port, _ := net.SplitHostPort(listenAddr)
+	host, port, _ := net.SplitHostPort(b.ListenAddr)
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "YOUR_SERVER_IP"
 	}
-	publicBase := fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
-	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password, len(encKey) > 0))
-
-	pool := NewBackendPool([]*Backend{{Label: localURL, Dav: dav, EncKey: encKey}})
-	RunServer(pool, proxy, healthListen)
+	publicBase = fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
+	return dav, publicBase
 }
 
 // atomicPUTHandler intercepts PUT requests and writes via temp-file + rename,
@@ -124,10 +198,12 @@ func (h *atomicPUTHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // selfhostedClientURI builds the URI for clients connecting over the network.
-// Poll settings use network-safe defaults (server's fast local values would
-// be too aggressive for a remote client). Chunk/concurrency settings are
-// inherited from the current server configuration.
-func selfhostedClientURI(publicBase, login, password string, enc bool) string {
+// Poll settings use network-safe defaults (the server's fast local values,
+// auto-tuned for polling its own localhost storage, would be too aggressive
+// for a remote client). Chunk/concurrency settings are inherited from the
+// current server configuration. extra packs additional backends the same
+// way ClientURI does.
+func selfhostedClientURI(publicBase, login, password string, enc bool, extra []BackendRef) string {
 	u, _ := url.Parse(publicBase)
 	switch u.Scheme {
 	case "http":
@@ -146,6 +222,9 @@ func selfhostedClientURI(publicBase, login, password string, enc bool) string {
 	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
 	if enc {
 		q.Set("enc", "1")
+	}
+	for _, b := range extra {
+		q.Add("backend", backendSubURI(b))
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
@@ -228,18 +307,21 @@ func basicAuth(user, pass string, next http.Handler) http.Handler {
 }
 
 // buildLocalURL returns the URL the server uses to reach its own WebDAV.
+// A socket bound to a specific non-wildcard address (e.g. 192.168.0.4:8080)
+// does not accept connections on 127.0.0.1 — only a genuine wildcard bind
+// (0.0.0.0, ::, or an empty host as in ":8080") does, so this must dial the
+// address the server actually bound to, not assume loopback works.
 func buildLocalURL(listenAddr string, tls bool) string {
-	_, port, err := net.SplitHostPort(listenAddr)
-	if err != nil {
-		scheme := "http"
-		if tls {
-			scheme = "https"
-		}
-		return scheme + "://" + listenAddr
-	}
 	scheme := "http"
 	if tls {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%s", scheme, port)
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return scheme + "://" + listenAddr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
 }

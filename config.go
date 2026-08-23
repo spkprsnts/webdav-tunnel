@@ -35,12 +35,20 @@ type Config struct {
 	WebdavStorage string `yaml:"webdav-storage"`
 	WebdavTLSCert string `yaml:"webdav-tls-cert"`
 	WebdavTLSKey  string `yaml:"webdav-tls-key"`
+	StorageOnly   bool   `yaml:"storage-only"`
 }
 
 type BackendConfig struct {
 	URL      string `yaml:"url"`
 	Login    string `yaml:"login"`
 	Password string `yaml:"password"`
+
+	// selfhosted mode only — starts an embedded WebDAV listener here
+	// instead of connecting to an existing external url.
+	WebdavListen  string `yaml:"webdav-listen"`
+	WebdavStorage string `yaml:"webdav-storage"`
+	WebdavTLSCert string `yaml:"webdav-tls-cert"`
+	WebdavTLSKey  string `yaml:"webdav-tls-key"`
 }
 
 type TuningConfig struct {

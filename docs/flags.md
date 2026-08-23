@@ -17,10 +17,11 @@
 | `-proxy` | server, selfhosted | — | Upstream SOCKS5 proxy: `socks5://[user:pass@]host:port` |
 | `-dns` | client, server | — | DNS server to resolve WebDAV backend hostnames with, e.g. `1.1.1.1:53` (default: OS resolver). Only affects reaching the backend itself — SOCKS5-tunneled traffic is always resolved server-side, never locally |
 | `-health-listen` | all | — | Address to serve a JSON health/status endpoint on, e.g. `127.0.0.1:9090` (default: disabled). See [docs/health.md](health.md) |
-| `-webdav-listen` | selfhosted | required | Address for the embedded WebDAV server (e.g. `:8080`) |
+| `-webdav-listen` | selfhosted | required (unless `-config` sets `backends:`) | Address for the embedded WebDAV server (e.g. `:8080`) |
 | `-webdav-storage` | selfhosted | `webdav-data` | Directory for session data |
 | `-webdav-tls-cert` | selfhosted | — | TLS certificate file |
 | `-webdav-tls-key` | selfhosted | — | TLS key file |
+| `-storage-only` | selfhosted | `false` | Serve WebDAV storage only, without running the relay — pair with a separate `-mode server` (or another selfhosted node's `backends:` list) that does the relaying. See [docs/config.md](config.md#self-hosted-multi-backend) |
 | `-poll-max` | all | `500ms` (selfhosted: `200ms`) | Maximum poll interval when idle |
 | `-poll-min` | all | `200ms` (selfhosted: `50ms`) | Starting poll interval (adaptive backoff) |
 | `-coalesce` | all | `10ms` (selfhosted: `5ms`) | Write coalescing window |

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"webdav-tunnel/tunnel"
+)
 
 func TestClientURIRoundTripMultiBackend(t *testing.T) {
 	cfgBackends := []BackendConfig{
@@ -53,5 +57,39 @@ func TestParseClientURIOldStyleSingleBackendUnaffected(t *testing.T) {
 	}
 	if len(extra) != 0 {
 		t.Fatalf("len(extra) = %d, want 0", len(extra))
+	}
+}
+
+func TestSelfHostedBackendsLegacySingle(t *testing.T) {
+	got := selfHostedBackends(nil, ":8080", "webdav-data", "user", "pass", "", "")
+
+	want := []tunnel.SelfHostedBackend{{
+		ListenAddr: ":8080", StorageDir: "webdav-data",
+		Login: "user", Password: "pass",
+	}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestSelfHostedBackendsFromConfigList(t *testing.T) {
+	cfgBackends := []BackendConfig{
+		{WebdavListen: ":18081", WebdavStorage: "custom-dir", Login: "user1", Password: "pass1"},
+		{WebdavListen: ":18082", Login: "user2", Password: "pass2"}, // no WebdavStorage: must auto-generate
+	}
+
+	got := selfHostedBackends(cfgBackends, "", "", "", "", "", "")
+
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].ListenAddr != ":18081" || got[0].StorageDir != "custom-dir" || got[0].Login != "user1" || got[0].Password != "pass1" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].ListenAddr != ":18082" || got[1].StorageDir == "" || got[1].Login != "user2" || got[1].Password != "pass2" {
+		t.Errorf("got[1] = %+v, want a non-empty auto-generated StorageDir", got[1])
+	}
+	if got[0].StorageDir == got[1].StorageDir {
+		t.Errorf("both backends got the same StorageDir %q — would corrupt each other's chunks", got[0].StorageDir)
 	}
 }

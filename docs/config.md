@@ -117,6 +117,56 @@ backends:
     password: mypass
 ```
 
+## Self-hosted multi-backend
+
+`-mode selfhosted` also accepts a `backends:` list — but its entries look
+different, since each one starts its *own* embedded WebDAV listener instead
+of pointing at an existing external `url`:
+
+```yaml
+mode: selfhosted
+backends:
+  - webdav-listen: :18081
+    webdav-storage: webdav-data-1
+    login: user1
+    password: pass1
+  - webdav-listen: :18082
+    webdav-storage: webdav-data-2
+    login: user2
+    password: pass2
+    # webdav-tls-cert / webdav-tls-key: optional, per backend
+```
+
+One process starts both embedded WebDAV servers and a single relay that
+rotates new sessions across them — the simplest way to run self-hosted
+multi-backend rotation, no separate processes or machines needed. The
+tradeoff: all backends share this process's fate — if it (or its machine)
+goes down, every backend goes down with it, so rotation buys you nothing
+against *that* failure mode (it still helps if, say, one port gets
+rate-limited by something upstream while the process itself stays healthy).
+
+For rotation that actually survives one backend's host going down, run each
+backend as its own process (each on its own machine), each started with
+`storage-only: true` so it *only* serves WebDAV storage without also
+relaying its own sessions:
+
+```yaml
+# on host A
+mode: selfhosted
+storage-only: true
+webdav-listen: :8080
+webdav-storage: webdav-data
+login: user1
+password: pass1
+```
+
+...then point a separate external `-mode server` (running wherever you like
+— it doesn't need to be self-hosted itself) at both hosts as `backends:`
+with plain `url:` entries, same as any other external WebDAV. **Never**
+point a storage-only node's own relay *and* an external server at the same
+storage at the same time — two independent relays racing over the same
+chunk files will corrupt sessions.
+
 ## Packing backends into a `-uri` instead of a file
 
 `-config` isn't the only way to share multiple backends — a server started

@@ -38,6 +38,7 @@ func main() {
 	webdavStorage := flag.String("webdav-storage", "webdav-data", "directory for WebDAV session data (selfhosted mode)")
 	webdavTLSCert := flag.String("webdav-tls-cert", "", "TLS certificate file (selfhosted mode, optional)")
 	webdavTLSKey := flag.String("webdav-tls-key", "", "TLS key file (selfhosted mode, optional)")
+	storageOnly := flag.Bool("storage-only", false, "selfhosted mode: serve WebDAV storage only, don't run the relay — use as a backend for a separate -mode server with a backends: list")
 
 	encrypt := flag.Bool("enc", false, "encrypt tunnel data with AES-256-GCM (key derived from each backend's WebDAV password)")
 	pollMax := flag.Duration("poll-max", tunnel.PollInterval, "maximum poll interval when idle")
@@ -73,7 +74,7 @@ func main() {
 			listen: listen, socksUser: socksUser, socksPass: socksPass, proxyStr: proxyStr,
 			timeout: timeout, encrypt: encrypt, dnsServer: dnsServer, healthListen: healthListen,
 			webdavListen: webdavListen, webdavStorage: webdavStorage,
-			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey,
+			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey, storageOnly: storageOnly,
 			pollMin: pollMin, pollMax: pollMax, coalesce: coalesce,
 			chunkSize: chunkSize, puts: puts, readAheadMin: readAheadMin, readAheadMax: readAheadMax,
 		})
@@ -166,22 +167,8 @@ func main() {
 		tunnel.RunServer(pool, parseProxy(*proxyStr), *healthListen)
 
 	case "selfhosted":
-		if *login == "" || *password == "" {
-			log.Fatal("required flags: -login, -password")
-		}
-		if *webdavListen == "" {
-			log.Fatal("-webdav-listen required for selfhosted mode (e.g., :8080)")
-		}
-		var encKey []byte
-		if *encrypt {
-			var err error
-			encKey, err = tunnel.DeriveKey(*login, *password)
-			if err != nil {
-				log.Fatalf("derive encryption key: %v", err)
-			}
-			log.Printf("encryption: enabled (AES-256-GCM, key derived from WebDAV login+password via scrypt)")
-		}
-		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout, encKey, *healthListen)
+		backends := selfHostedBackends(cfgBackends, *webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey)
+		tunnel.RunSelfHosted(backends, parseProxy(*proxyStr), *timeout, *encrypt, *healthListen, *storageOnly)
 
 	default:
 		log.Fatal("-mode must be: client | server | selfhosted")
@@ -194,7 +181,7 @@ type configFlags struct {
 	listen, socksUser, socksPass, proxyStr      *string
 	dnsServer, healthListen                     *string
 	timeout                                     *time.Duration
-	encrypt                                     *bool
+	encrypt, storageOnly                        *bool
 	webdavListen, webdavStorage                 *string
 	webdavTLSCert, webdavTLSKey                 *string
 	pollMin, pollMax, coalesce                  *time.Duration
@@ -229,6 +216,10 @@ func applyConfig(cfg *Config, explicit map[string]bool, f configFlags) {
 	if cfg.Enc && !explicit["enc"] {
 		*f.encrypt = true
 		explicit["enc"] = true
+	}
+	if cfg.StorageOnly && !explicit["storage-only"] {
+		*f.storageOnly = true
+		explicit["storage-only"] = true
 	}
 	if cfg.Timeout != nil && !explicit["timeout"] {
 		*f.timeout = time.Duration(*cfg.Timeout)
@@ -369,6 +360,44 @@ func newBackend(label, rawURL, login, password, dnsServer string, timeout time.D
 		Dav:    tunnel.NewWebDAV(rawURL, login, password, timeout, dnsServer),
 		EncKey: key,
 	}
+}
+
+// selfHostedBackends builds the list of embedded WebDAV listeners for
+// -mode selfhosted from a multi-backend config list if present, otherwise
+// falls back to the single legacy -webdav-listen/-login/-password (or
+// -config's flat top-level fields, already applied to those flag vars by
+// applyConfig) backend.
+func selfHostedBackends(backendsCfg []BackendConfig, webdavListen, webdavStorage, login, password, webdavTLSCert, webdavTLSKey string) []tunnel.SelfHostedBackend {
+	if len(backendsCfg) == 0 {
+		if login == "" || password == "" {
+			log.Fatal("required flags: -login, -password (or -config with a backends: list)")
+		}
+		if webdavListen == "" {
+			log.Fatal("-webdav-listen required for selfhosted mode (e.g., :8080)")
+		}
+		return []tunnel.SelfHostedBackend{{
+			ListenAddr: webdavListen, StorageDir: webdavStorage,
+			Login: login, Password: password,
+			CertFile: webdavTLSCert, KeyFile: webdavTLSKey,
+		}}
+	}
+
+	backends := make([]tunnel.SelfHostedBackend, 0, len(backendsCfg))
+	for i, bc := range backendsCfg {
+		if bc.Login == "" || bc.Password == "" || bc.WebdavListen == "" {
+			log.Fatalf("selfhosted backends[%d]: webdav-listen, login, and password are required", i)
+		}
+		storage := bc.WebdavStorage
+		if storage == "" {
+			storage = fmt.Sprintf("webdav-data-%d", i+1)
+		}
+		backends = append(backends, tunnel.SelfHostedBackend{
+			ListenAddr: bc.WebdavListen, StorageDir: storage,
+			Login: bc.Login, Password: bc.Password,
+			CertFile: bc.WebdavTLSCert, KeyFile: bc.WebdavTLSKey,
+		})
+	}
+	return backends
 }
 
 // buildPool builds the backend pool from a multi-backend config list if

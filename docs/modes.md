@@ -4,6 +4,8 @@
 
 The server runs its own embedded WebDAV — no external storage needed. The simplest way to get started.
 
+For multiple self-hosted backends (rotation instead of a single point of failure), see [config.md#self-hosted-multi-backend](config.md#self-hosted-multi-backend) — `-mode selfhosted` accepts a `backends:` list in its `-config` file too.
+
 **Server:**
 ```sh
 webdav-tunnel \
