@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -199,6 +200,62 @@ func (w *WebDAV) Mkcol(ctx context.Context, path string) error {
 	// 405 = already exists, 409 = parent missing (treat as ok, Mkcol is best-effort)
 	if resp.StatusCode >= 400 && resp.StatusCode != 405 && resp.StatusCode != 409 {
 		return fmt.Errorf("MKCOL %s: %s", path, resp.Status)
+	}
+	return nil
+}
+
+// EnsureBasePath creates every path segment of the WebDAV base URL that
+// doesn't exist yet, one level at a time (e.g. for a base URL ending in
+// /a/b/c, it MKCOLs /a, then /a/b, then /a/b/c). Without this, a base URL
+// pointing at a not-yet-existing folder (e.g. a fresh backend configured as
+// https://example.com/testpath) would 409 forever on every operation under
+// it — Mkcol alone can't fix that since it only creates one level and
+// treats "parent missing" as non-fatal. Safe to call even when the base
+// path already exists (MKCOL on an existing collection is a no-op 405, not
+// an error).
+func (w *WebDAV) EnsureBasePath(ctx context.Context) error {
+	u, err := url.Parse(w.baseURL)
+	if err != nil {
+		return fmt.Errorf("parse base URL %q: %w", w.baseURL, err)
+	}
+	trimmed := strings.Trim(u.Path, "/")
+	if trimmed == "" {
+		return nil // no path prefix — nothing to create
+	}
+	root := u.Scheme + "://" + u.Host
+	path := ""
+	for _, seg := range strings.Split(trimmed, "/") {
+		path += "/" + seg
+		absURL := root + path
+		if err := w.mkcolAbs(ctx, absURL); err != nil {
+			return fmt.Errorf("mkcol %s: %w", absURL, err)
+		}
+	}
+	return nil
+}
+
+// mkcolAbs issues MKCOL against an absolute URL rather than one relative to
+// w.baseURL. Unlike Mkcol, a 409 here is treated as a real failure: callers
+// create one path segment at a time, so by the time a segment is created
+// its parent is already known to exist — a 409 means something else is
+// wrong (e.g. permissions), not a normal "create the parent first" case.
+func (w *WebDAV) mkcolAbs(ctx context.Context, absURL string) error {
+	req, err := http.NewRequestWithContext(ctx, "MKCOL", absURL, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(w.login, w.password)
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return err
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == 429 {
+		return &rateLimitError{wait: parseRetryAfter(resp.Header)}
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode != 405 { // 405 = already exists
+		return fmt.Errorf("%s", resp.Status)
 	}
 	return nil
 }

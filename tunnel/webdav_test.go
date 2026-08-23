@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -121,5 +122,98 @@ func TestNewWebDAVDNSServerPortDefaultedTo53(t *testing.T) {
 	dav := NewWebDAV("http://127.0.0.1:1", "u", "p", time.Second, "127.0.0.1")
 	if dav == nil {
 		t.Fatal("NewWebDAV returned nil")
+	}
+}
+
+// fakeMkcolServer mimics just enough WebDAV MKCOL semantics to test
+// EnsureBasePath: MKCOL on a path whose parent doesn't exist yet returns
+// 409, MKCOL on an already-existing collection returns 405, and MKCOL on a
+// path whose parent does exist succeeds with 201 and records it as existing.
+type fakeMkcolServer struct {
+	mu       sync.Mutex
+	existing map[string]bool // "" (root) is always considered to exist
+	mkcols   []string        // order MKCOL was called, for asserting recursion order
+}
+
+func newFakeMkcolServer() *fakeMkcolServer {
+	return &fakeMkcolServer{existing: make(map[string]bool)}
+}
+
+func (f *fakeMkcolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "MKCOL" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	p := strings.TrimRight(r.URL.Path, "/")
+	f.mkcols = append(f.mkcols, p)
+
+	if f.existing[p] {
+		w.WriteHeader(http.StatusMethodNotAllowed) // 405: already exists
+		return
+	}
+	parent := p[:strings.LastIndex(p, "/")]
+	if parent != "" && !f.existing[parent] {
+		w.WriteHeader(http.StatusConflict) // 409: parent missing
+		return
+	}
+	f.existing[p] = true
+	w.WriteHeader(http.StatusCreated)
+}
+
+func TestEnsureBasePathCreatesNestedSegmentsInOrder(t *testing.T) {
+	fake := newFakeMkcolServer()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	dav := NewWebDAV(srv.URL+"/a/b/c", "user", "pass", 5*time.Second, "")
+
+	if err := dav.EnsureBasePath(context.Background()); err != nil {
+		t.Fatalf("EnsureBasePath: %v", err)
+	}
+
+	want := []string{"/a", "/a/b", "/a/b/c"}
+	fake.mu.Lock()
+	got := fake.mkcols
+	fake.mu.Unlock()
+	if len(got) != len(want) {
+		t.Fatalf("mkcols = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("mkcols[%d] = %q, want %q (must create shallowest segment first)", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEnsureBasePathNoOpForRootURL(t *testing.T) {
+	fake := newFakeMkcolServer()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	dav := NewWebDAV(srv.URL, "user", "pass", 5*time.Second, "")
+
+	if err := dav.EnsureBasePath(context.Background()); err != nil {
+		t.Fatalf("EnsureBasePath: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.mkcols) != 0 {
+		t.Errorf("mkcols = %v, want none (base URL has no path)", fake.mkcols)
+	}
+}
+
+func TestEnsureBasePathToleratesAlreadyExisting(t *testing.T) {
+	fake := newFakeMkcolServer()
+	fake.existing["/testpath"] = true // simulate a folder that already exists
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	dav := NewWebDAV(srv.URL+"/testpath", "user", "pass", 5*time.Second, "")
+
+	if err := dav.EnsureBasePath(context.Background()); err != nil {
+		t.Fatalf("EnsureBasePath on an already-existing path should not error: %v", err)
 	}
 }

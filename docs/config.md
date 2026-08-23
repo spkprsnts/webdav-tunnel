@@ -67,7 +67,7 @@ example.
 
 `-dns` (or `dns:` in the config) only controls how the **WebDAV backend's own
 hostname** is resolved — useful when the client's default/OS DNS is
-unreliable, filtered, or blocked, but the backend (e.g. `webdav.yandex.ru`)
+unreliable, filtered, or blocked, but the backend (e.g. `dav.example.com`)
 still needs to be reachable. It has nothing to do with the SOCKS5-tunneled
 traffic: destination hostnames for proxied connections are always resolved
 **server-side**, never on the client, regardless of this setting. See
@@ -104,13 +104,13 @@ existing per-request 429 backoff for transient rate limits); only the next
 
 Backends don't have to be your own selfhosted instances — each entry is just
 a plain WebDAV endpoint with basic auth, so you can mix a selfhosted node
-with third-party WebDAV storage (Yandex Disk, Nextcloud, Box, ...) as
-fallbacks for each other:
+with third-party WebDAV storage (Nextcloud, Box, ...) as fallbacks for each
+other:
 
 ```yaml
 backends:
-  - url: https://webdav.yandex.ru
-    login: you@yandex.ru
+  - url: https://dav.example.com
+    login: you@example.com
     password: app-password
   - url: https://your-selfhosted-server:8080
     login: myuser

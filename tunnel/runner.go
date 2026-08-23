@@ -280,7 +280,11 @@ func startupCleanup(dav *WebDAV) {
 }
 
 func ensureTunnelDir(dav *WebDAV) {
-	if err := dav.Mkcol(context.Background(), "tunnel"); err != nil {
+	ctx := context.Background()
+	if err := dav.EnsureBasePath(ctx); err != nil {
+		log.Printf("warning: base URL path does not exist and could not be created: %v", err)
+	}
+	if err := dav.Mkcol(ctx, "tunnel"); err != nil {
 		log.Printf("warning: mkcol tunnel dir: %v", err)
 	}
 }
