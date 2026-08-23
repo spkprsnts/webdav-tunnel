@@ -54,7 +54,7 @@ func Start(webdavURL, login, password, socksListen, socksUser, socksPass string)
 
 	go func() {
 		defer running.Store(false)
-		if err := tunnel.RunProxy(ctx, pool, socksListen, socksUser, socksPass); err != nil {
+		if err := tunnel.RunProxy(ctx, pool, socksListen, socksUser, socksPass, ""); err != nil {
 			log.Printf("tunnel proxy error: %v", err)
 		}
 	}()

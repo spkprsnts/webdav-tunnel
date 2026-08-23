@@ -16,10 +16,16 @@ import (
 const initFailCooldown = 10 * time.Second
 
 // RunProxy starts the SOCKS5 proxy client. Blocks until ctx is cancelled.
-// Returns an error if the listener cannot be started.
-func RunProxy(ctx context.Context, pool *BackendPool, listenAddr, socksUser, socksPass string) error {
+// Returns an error if the listener cannot be started. If healthListen is
+// non-empty, an HTTP health endpoint is served there (see HealthStats).
+func RunProxy(ctx context.Context, pool *BackendPool, listenAddr, socksUser, socksPass, healthListen string) error {
 	for _, b := range pool.All() {
 		ensureTunnelDir(b.Dav)
+	}
+
+	health := NewHealthStats()
+	if healthListen != "" {
+		go health.Serve(healthListen, pool)
 	}
 
 	ln, err := net.Listen("tcp", listenAddr)
@@ -86,7 +92,9 @@ func RunProxy(ctx context.Context, pool *BackendPool, listenAddr, socksUser, soc
 		log.Printf("[%s] mux ready, waiting for server...", sid)
 		go watchServerPresence(ctx, backend.Dav, sid, muxSess.CloseChan())
 
+		health.SessionStarted(sid, backend.Label)
 		proxyMuxLoop(ctx, muxSess, connCh, socksUser, socksPass)
+		health.SessionEnded(sid)
 
 		muxSess.Close()
 		close(hbDone)
@@ -105,8 +113,9 @@ func RunProxy(ctx context.Context, pool *BackendPool, listenAddr, socksUser, soc
 }
 
 // RunServer polls for client sessions across every backend in the pool and
-// handles them. Blocks indefinitely.
-func RunServer(pool *BackendPool, proxy *ProxyConfig) {
+// handles them. Blocks indefinitely. If healthListen is non-empty, an HTTP
+// health endpoint is served there (see HealthStats).
+func RunServer(pool *BackendPool, proxy *ProxyConfig, healthListen string) {
 	for _, b := range pool.All() {
 		ensureTunnelDir(b.Dav)
 	}
@@ -116,6 +125,11 @@ func RunServer(pool *BackendPool, proxy *ProxyConfig) {
 	}
 	for _, b := range pool.All() {
 		go startupCleanup(b.Dav)
+	}
+
+	health := NewHealthStats()
+	if healthListen != "" {
+		go health.Serve(healthListen, pool)
 	}
 
 	type sessionEntry struct {
@@ -166,10 +180,13 @@ func RunServer(pool *BackendPool, proxy *ProxyConfig) {
 				if seen {
 					continue
 				}
+				health.SessionStarted(key, backend.Label)
 				go func(id string, b *Backend) {
 					serverMuxSession(b.Dav, id, proxy, b.EncKey)
+					key := b.Label + "|" + id
+					health.SessionEnded(key)
 					mu.Lock()
-					if e, ok := known[b.Label+"|"+id]; ok {
+					if e, ok := known[key]; ok {
 						e.closedAt = time.Now()
 					}
 					mu.Unlock()

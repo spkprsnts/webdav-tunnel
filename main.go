@@ -26,6 +26,7 @@ func main() {
 	proxyStr := flag.String("proxy", "", "upstream SOCKS5 proxy for the server: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "HTTP request timeout")
 	dnsServer := flag.String("dns", "", "DNS server to resolve WebDAV backend hostnames with, e.g. 1.1.1.1:53 (default: OS resolver). Only affects reaching the backend itself, not SOCKS5-tunneled traffic")
+	healthListen := flag.String("health-listen", "", "address:port to serve a JSON health/status endpoint on, e.g. 127.0.0.1:9090 (default: disabled). No authentication — bind to loopback or firewall it")
 
 	// selfhosted mode
 	webdavListen := flag.String("webdav-listen", "", "address:port for the embedded WebDAV server (selfhosted mode), e.g. :8080")
@@ -60,7 +61,7 @@ func main() {
 		applyConfig(cfg, explicit, configFlags{
 			mode: mode, webdavURL: webdavURL, login: login, password: password,
 			listen: listen, socksUser: socksUser, socksPass: socksPass, proxyStr: proxyStr,
-			timeout: timeout, encrypt: encrypt, dnsServer: dnsServer,
+			timeout: timeout, encrypt: encrypt, dnsServer: dnsServer, healthListen: healthListen,
 			webdavListen: webdavListen, webdavStorage: webdavStorage,
 			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey,
 			pollMin: pollMin, pollMax: pollMax, coalesce: coalesce,
@@ -140,7 +141,7 @@ func main() {
 		if *socksUser != "" {
 			log.Printf("SOCKS5 auth enabled for user %q", *socksUser)
 		}
-		if err := tunnel.RunProxy(context.Background(), pool, *listen, *socksUser, *socksPass); err != nil {
+		if err := tunnel.RunProxy(context.Background(), pool, *listen, *socksUser, *socksPass, *healthListen); err != nil {
 			log.Fatalf("proxy: %v", err)
 		}
 
@@ -152,7 +153,7 @@ func main() {
 		log.Printf("server: ════════════════════════════════════════════════════")
 		log.Printf("server: client -uri  %s", serverClientURI(cfgBackends, *webdavURL, *login, *password, *encrypt))
 		log.Printf("server: ════════════════════════════════════════════════════")
-		tunnel.RunServer(pool, parseProxy(*proxyStr))
+		tunnel.RunServer(pool, parseProxy(*proxyStr), *healthListen)
 
 	case "selfhosted":
 		if *login == "" || *password == "" {
@@ -170,7 +171,7 @@ func main() {
 			}
 			log.Printf("encryption: enabled (AES-256-GCM, key derived from WebDAV login+password via scrypt)")
 		}
-		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout, encKey)
+		tunnel.RunSelfHosted(*webdavListen, *webdavStorage, *login, *password, *webdavTLSCert, *webdavTLSKey, parseProxy(*proxyStr), *timeout, encKey, *healthListen)
 
 	default:
 		log.Fatal("-mode must be: client | server | selfhosted")
@@ -181,7 +182,7 @@ func main() {
 type configFlags struct {
 	mode, webdavURL, login, password            *string
 	listen, socksUser, socksPass, proxyStr      *string
-	dnsServer                                   *string
+	dnsServer, healthListen                     *string
 	timeout                                     *time.Duration
 	encrypt                                     *bool
 	webdavListen, webdavStorage                 *string
@@ -209,6 +210,7 @@ func applyConfig(cfg *Config, explicit map[string]bool, f configFlags) {
 	setStr(f.socksPass, "socks-pass", cfg.SocksPass)
 	setStr(f.proxyStr, "proxy", cfg.Proxy)
 	setStr(f.dnsServer, "dns", cfg.DNS)
+	setStr(f.healthListen, "health-listen", cfg.HealthListen)
 	setStr(f.webdavListen, "webdav-listen", cfg.WebdavListen)
 	setStr(f.webdavStorage, "webdav-storage", cfg.WebdavStorage)
 	setStr(f.webdavTLSCert, "webdav-tls-cert", cfg.WebdavTLSCert)

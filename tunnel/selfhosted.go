@@ -22,7 +22,7 @@ import (
 // Blocks indefinitely. Clients connect using:
 //
 //	-mode client -uri <printed-uri> -socks-listen 127.0.0.1:1080
-func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration, encKey []byte) {
+func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile string, proxy *ProxyConfig, timeout time.Duration, encKey []byte, healthListen string) {
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		log.Fatalf("selfhosted: cannot create storage dir %q: %v", storageDir, err)
 	}
@@ -77,7 +77,7 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password, len(encKey) > 0))
 
 	pool := NewBackendPool([]*Backend{{Label: localURL, Dav: dav, EncKey: encKey}})
-	RunServer(pool, proxy)
+	RunServer(pool, proxy, healthListen)
 }
 
 // atomicPUTHandler intercepts PUT requests and writes via temp-file + rename,

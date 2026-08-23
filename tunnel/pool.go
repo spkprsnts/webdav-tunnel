@@ -3,6 +3,7 @@ package tunnel
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Backend struct {
 
 	mu            sync.Mutex
 	cooldownUntil time.Time
+	retries       atomic.Int64
 }
 
 // Cooldown marks the backend as unavailable until d has elapsed.
@@ -28,6 +30,7 @@ func (b *Backend) Cooldown(d time.Duration) {
 	b.mu.Lock()
 	b.cooldownUntil = until
 	b.mu.Unlock()
+	b.retries.Add(1)
 	log.Printf("backend %s: cooling down for %v", b.Label, d.Round(time.Millisecond))
 }
 
@@ -36,6 +39,25 @@ func (b *Backend) inCooldown() (bool, time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return time.Now().Before(b.cooldownUntil), b.cooldownUntil
+}
+
+// BackendStatus is a point-in-time snapshot of a backend's health, for the
+// -health-listen endpoint.
+type BackendStatus struct {
+	Label         string     `json:"label"`
+	Healthy       bool       `json:"healthy"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	Retries       int64      `json:"retries"`
+}
+
+// Status returns a snapshot of the backend's current health.
+func (b *Backend) Status() BackendStatus {
+	cooling, until := b.inCooldown()
+	s := BackendStatus{Label: b.Label, Healthy: !cooling, Retries: b.retries.Load()}
+	if cooling {
+		s.CooldownUntil = &until
+	}
+	return s
 }
 
 // BackendPool round-robins over a set of backends, skipping ones in cooldown.

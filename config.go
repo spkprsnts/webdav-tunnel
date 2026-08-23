@@ -12,14 +12,15 @@ import (
 // YAML file keeps its flag default; an explicit CLI flag always overrides
 // a config value (see applyConfig in main.go).
 type Config struct {
-	Mode        string    `yaml:"mode"`
-	SocksListen string    `yaml:"socks-listen"`
-	SocksUser   string    `yaml:"socks-user"`
-	SocksPass   string    `yaml:"socks-pass"`
-	Enc         bool      `yaml:"enc"`
-	Timeout     *Duration `yaml:"timeout"`
-	Proxy       string    `yaml:"proxy"`
-	DNS         string    `yaml:"dns"`
+	Mode         string    `yaml:"mode"`
+	SocksListen  string    `yaml:"socks-listen"`
+	SocksUser    string    `yaml:"socks-user"`
+	SocksPass    string    `yaml:"socks-pass"`
+	Enc          bool      `yaml:"enc"`
+	Timeout      *Duration `yaml:"timeout"`
+	Proxy        string    `yaml:"proxy"`
+	DNS          string    `yaml:"dns"`
+	HealthListen string    `yaml:"health-listen"`
 
 	// Single-backend shorthand — ignored if Backends is non-empty.
 	Webdav   string `yaml:"webdav"`
