@@ -49,6 +49,7 @@ Configure your browser or app to use `127.0.0.1:1080` as a SOCKS5 proxy.
 ## Documentation
 
 - [Modes](docs/modes.md) — selfhosted, external WebDAV, client URI format, advanced scenarios
+- [Config](docs/config.md) — YAML config file, multi-backend WebDAV rotation
 - [Encryption](docs/encryption.md) — AES-256-GCM chunk encryption (`-enc` flag)
 - [Tuning](docs/tuning.md) — polling, chunk size, concurrency, notes
 - [Flags](docs/flags.md) — complete flags reference

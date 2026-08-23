@@ -76,7 +76,8 @@ func RunSelfHosted(listenAddr, storageDir, login, password, certFile, keyFile st
 	publicBase := fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
 	printClientURI("selfhosted", selfhostedClientURI(publicBase, login, password, len(encKey) > 0))
 
-	RunServer(dav, proxy, encKey)
+	pool := NewBackendPool([]*Backend{{Label: localURL, Dav: dav, EncKey: encKey}})
+	RunServer(pool, proxy)
 }
 
 // atomicPUTHandler intercepts PUT requests and writes via temp-file + rename,
@@ -150,10 +151,37 @@ func selfhostedClientURI(publicBase, login, password string, enc bool) string {
 	return u.String()
 }
 
+// BackendRef identifies one WebDAV backend for ClientURI's extra backends.
+type BackendRef struct {
+	URL      string
+	Login    string
+	Password string
+}
+
+// backendSubURI renders a bare webdav://user:pass@host URI (no query, no
+// fragment) for embedding as a "backend" query parameter value.
+func backendSubURI(b BackendRef) string {
+	u, _ := url.Parse(b.URL)
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "webdav"
+	case "https":
+		u.Scheme = "webdavs"
+	}
+	u.User = url.UserPassword(b.Login, b.Password)
+	return u.String()
+}
+
 // ClientURI converts an http/https WebDAV base URL into a webdav:// URI
 // with credentials and current tuning settings as query parameters.
 // Use this URI as the -uri flag value on the client.
-func ClientURI(baseURL, login, password string, enc bool) string {
+//
+// extra holds additional backends for multi-backend rotation: each is
+// packed as its own nested webdav://user:pass@host URI in a repeated
+// "backend" query parameter. A client that doesn't understand "backend"
+// simply ignores it and connects to the primary backend only — the URI
+// degrades gracefully instead of failing to parse.
+func ClientURI(baseURL, login, password string, enc bool, extra []BackendRef) string {
 	u, _ := url.Parse(baseURL)
 	switch u.Scheme {
 	case "http":
@@ -172,6 +200,9 @@ func ClientURI(baseURL, login, password string, enc bool) string {
 	q.Set("read-max", strconv.Itoa(MaxReadAheadWindow))
 	if enc {
 		q.Set("enc", "1")
+	}
+	for _, b := range extra {
+		q.Add("backend", backendSubURI(b))
 	}
 	u.RawQuery = q.Encode()
 	return u.String()

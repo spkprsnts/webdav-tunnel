@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net"
 	"sync"
@@ -12,10 +13,14 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+const initFailCooldown = 10 * time.Second
+
 // RunProxy starts the SOCKS5 proxy client. Blocks until ctx is cancelled.
 // Returns an error if the listener cannot be started.
-func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass string, encKey []byte) error {
-	ensureTunnelDir(dav)
+func RunProxy(ctx context.Context, pool *BackendPool, listenAddr, socksUser, socksPass string) error {
+	for _, b := range pool.All() {
+		ensureTunnelDir(b.Dav)
+	}
 
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -44,9 +49,16 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 			return nil
 		}
 		sid := newSessionID()
-		pipe := NewPipe(dav, sid, "c2s", "s2c", encKey)
+		backend := pool.Pick()
+		pipe := NewPipe(backend.Dav, sid, "c2s", "s2c", backend.EncKey)
 		if err := pipe.Init(); err != nil {
-			log.Printf("[%s] pipe init failed: %v", sid, err)
+			log.Printf("[%s] pipe init failed on backend %s: %v", sid, backend.Label, err)
+			var rlErr *rateLimitError
+			if errors.As(err, &rlErr) {
+				backend.Cooldown(rlErr.wait)
+			} else {
+				backend.Cooldown(initFailCooldown)
+			}
 			select {
 			case <-time.After(3 * time.Second):
 			case <-ctx.Done():
@@ -72,7 +84,7 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 			continue
 		}
 		log.Printf("[%s] mux ready, waiting for server...", sid)
-		go watchServerPresence(ctx, dav, sid, muxSess.CloseChan())
+		go watchServerPresence(ctx, backend.Dav, sid, muxSess.CloseChan())
 
 		proxyMuxLoop(ctx, muxSess, connCh, socksUser, socksPass)
 
@@ -92,14 +104,19 @@ func RunProxy(ctx context.Context, dav *WebDAV, listenAddr, socksUser, socksPass
 	}
 }
 
-// RunServer polls for client sessions and handles them. Blocks indefinitely.
-func RunServer(dav *WebDAV, proxy *ProxyConfig, encKey []byte) {
-	ensureTunnelDir(dav)
+// RunServer polls for client sessions across every backend in the pool and
+// handles them. Blocks indefinitely.
+func RunServer(pool *BackendPool, proxy *ProxyConfig) {
+	for _, b := range pool.All() {
+		ensureTunnelDir(b.Dav)
+	}
 	log.Printf("server mode: dynamic target (SOCKS5 passthrough)")
 	if proxy != nil {
 		log.Printf("server mode: routing through SOCKS5 proxy %s", proxy.addr)
 	}
-	go startupCleanup(dav)
+	for _, b := range pool.All() {
+		go startupCleanup(b.Dav)
+	}
 
 	type sessionEntry struct {
 		closedAt time.Time
@@ -123,30 +140,41 @@ func RunServer(dav *WebDAV, proxy *ProxyConfig, encKey []byte) {
 	}()
 
 	for {
-		sessions, err := dav.ListSessions(context.Background())
-		if err != nil {
-			log.Printf("list sessions error: %v", err)
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		for _, sid := range sessions {
-			mu.Lock()
-			_, seen := known[sid]
-			if !seen {
-				known[sid] = &sessionEntry{}
-			}
-			mu.Unlock()
-			if seen {
+		for _, backend := range pool.All() {
+			if cooling, _ := backend.inCooldown(); cooling {
 				continue
 			}
-			go func(id string) {
-				serverMuxSession(dav, id, proxy, encKey)
+			sessions, err := backend.Dav.ListSessions(context.Background())
+			if err != nil {
+				log.Printf("backend %s: list sessions error: %v", backend.Label, err)
+				var rlErr *rateLimitError
+				if errors.As(err, &rlErr) {
+					backend.Cooldown(rlErr.wait)
+				} else {
+					backend.Cooldown(initFailCooldown)
+				}
+				continue
+			}
+			for _, sid := range sessions {
+				key := backend.Label + "|" + sid
 				mu.Lock()
-				if e, ok := known[id]; ok {
-					e.closedAt = time.Now()
+				_, seen := known[key]
+				if !seen {
+					known[key] = &sessionEntry{}
 				}
 				mu.Unlock()
-			}(sid)
+				if seen {
+					continue
+				}
+				go func(id string, b *Backend) {
+					serverMuxSession(b.Dav, id, proxy, b.EncKey)
+					mu.Lock()
+					if e, ok := known[b.Label+"|"+id]; ok {
+						e.closedAt = time.Now()
+					}
+					mu.Unlock()
+				}(sid, backend)
+			}
 		}
 		time.Sleep(3 * time.Second)
 	}

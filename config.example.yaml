@@ -1,0 +1,31 @@
+# Example webdav-tunnel config. Use with: webdav-tunnel -config config.yaml
+#
+# Any field left out here keeps its flag default. A CLI flag passed
+# explicitly always overrides the same field from this file.
+# See docs/config.md for the full precedence rules.
+
+mode: client                     # client | server | selfhosted
+socks-listen: 127.0.0.1:1080
+enc: true
+
+# Multiple WebDAV backends — the client rotates to the next one for each new
+# session, skipping any backend that's rate limited (HTTP 429) or unreachable
+# until its cooldown expires. Use the SAME backends: list on both the client
+# and the server.
+backends:
+  - url: https://dav1.example.com
+    login: user1
+    password: pass1
+  - url: https://dav2.example.com
+    login: user2
+    password: pass2
+
+# Optional: uncomment to tune polling/chunking instead of using the defaults.
+# tuning:
+#   poll-min: 200ms
+#   poll-max: 500ms
+#   coalesce: 10ms
+#   chunk-size: 131071
+#   puts: 8
+#   read-min: 3
+#   read-max: 8

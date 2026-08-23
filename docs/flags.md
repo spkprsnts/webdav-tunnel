@@ -3,10 +3,11 @@
 | Flag | Mode | Default | Description |
 |------|------|---------|-------------|
 | `-mode` | — | required | `client`, `server`, or `selfhosted` |
+| `-config` | all | — | Path to a YAML config file ([docs/config.md](config.md)); the way to declare multiple WebDAV backends. CLI flags override its values |
 | `-uri` | client | — | Connection URI (`webdav://user:pass@host:port`), replaces `-webdav`/`-login`/`-password` and tuning flags |
-| `-webdav` | client, server | required | WebDAV base URL |
-| `-login` | all | required | WebDAV username |
-| `-password` | all | required | WebDAV password |
+| `-webdav` | client, server | required (unless `-config` sets `backends:`) | WebDAV base URL |
+| `-login` | all | required (unless `-config` sets `backends:`) | WebDAV username |
+| `-password` | all | required (unless `-config` sets `backends:`) | WebDAV password |
 | `-enc` | all | `false` | Encrypt chunk data with AES-256-GCM (key derived from WebDAV password) |
 | `-timeout` | all | `60s` | HTTP request timeout |
 | `-socks-listen` | client | required | Address for the SOCKS5 listener (e.g. `127.0.0.1:1080`) |

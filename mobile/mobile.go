@@ -46,12 +46,14 @@ func Start(webdavURL, login, password, socksListen, socksUser, socksPass string)
 		return fmt.Errorf("WebDAV connection failed: %w", err)
 	}
 
+	pool := tunnel.NewBackendPool([]*tunnel.Backend{{Label: webdavURL, Dav: dav, EncKey: encKey}})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancelFn = cancel
 
 	go func() {
 		defer running.Store(false)
-		if err := tunnel.RunProxy(ctx, dav, socksListen, socksUser, socksPass, encKey); err != nil {
+		if err := tunnel.RunProxy(ctx, pool, socksListen, socksUser, socksPass); err != nil {
 			log.Printf("tunnel proxy error: %v", err)
 		}
 	}()
@@ -104,4 +106,3 @@ func SetEncrypt(password string) { encKey = tunnel.DeriveKey(password) }
 
 // ClearEncrypt disables encryption (default). Call before Start().
 func ClearEncrypt() { encKey = nil }
-

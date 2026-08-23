@@ -183,6 +183,16 @@ webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -pol
 
 Supported query parameters: `poll-min`, `poll-max`, `coalesce`, `chunk-size`, `puts`, `read-min`, `read-max`, `enc`.
 
+### Multiple backends in one URI
+
+`backend` is a repeatable query parameter that packs additional WebDAV backends into the same URI for rotation (see [config.md](config.md#multi-backend-rotation)). The primary backend stays in the URI's userinfo/host exactly as above; each extra one is a full nested `webdav://user:pass@host` URI, percent-encoded as its own `backend=` value:
+
+```
+webdav://user1:pass1@host1:8081?poll-min=50ms&backend=webdavs%3A%2F%2Fuser2%3Apass2%40host2%3A8082
+```
+
+A server started with multiple `-config` backends prints a URI in this form automatically. A client that doesn't recognize `backend=` (older version) simply ignores it and connects to the primary backend only — the URI still parses.
+
 ---
 
 ## Advanced scenarios
