@@ -54,6 +54,20 @@ type WebDAV struct {
 // how the SOCKS5-tunneled traffic's destinations are resolved (that always
 // happens server-side, in dialTarget).
 func NewWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer string) *WebDAV {
+	return newWebDAV(baseURL, login, password, timeout, dnsServer, false)
+}
+
+// newWebDAVLoopback is like NewWebDAV but skips TLS certificate
+// verification. Only for dialing an embedded selfhosted backend on
+// 127.0.0.1: the certificate there is chosen for real remote clients (e.g.
+// a domain cert with no 127.0.0.1 SAN) and this connection never leaves the
+// host, so there's no MITM to defend against — the socket only accepts
+// connections this same machine's kernel routes internally.
+func newWebDAVLoopback(baseURL, login, password string, timeout time.Duration) *WebDAV {
+	return newWebDAV(baseURL, login, password, timeout, "", true)
+}
+
+func newWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer string, insecureSkipVerify bool) *WebDAV {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 15 * time.Second,
@@ -78,6 +92,9 @@ func NewWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer
 		MaxIdleConnsPerHost:   32,
 		MaxConnsPerHost:       32,
 		IdleConnTimeout:       10 * time.Second,
+	}
+	if insecureSkipVerify {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &WebDAV{
 		baseURL:  strings.TrimRight(baseURL, "/"),

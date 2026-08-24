@@ -127,7 +127,7 @@ func startEmbeddedWebDAV(b SelfHostedBackend, timeout time.Duration) (dav *WebDA
 	}()
 
 	localURL := buildLocalURL(b.ListenAddr, b.CertFile != "")
-	dav = NewWebDAV(localURL, b.Login, b.Password, timeout, "") // no external DNS needed — see buildLocalURL
+	dav = newWebDAVLoopback(localURL, b.Login, b.Password, timeout) // loopback-only; cert may not cover 127.0.0.1 — see newWebDAVLoopback
 
 	ctx := context.Background()
 	var pingErr error
