@@ -106,6 +106,10 @@ type Pipe struct {
 	headMu    sync.Mutex
 	headMoved chan struct{} // closed and replaced when head advances
 
+	// readers tracks startReader and its fetches, which all exit once ctx is
+	// cancelled; tests wait on it before changing the polling globals.
+	readers sync.WaitGroup
+
 	latMu      sync.Mutex
 	latMax     time.Duration
 	latSum     time.Duration
@@ -274,7 +278,11 @@ const deleteWorkers = 4
 
 func (p *Pipe) start() {
 	go p.startWriter()
-	go p.startReader()
+	p.readers.Add(1)
+	go func() {
+		defer p.readers.Done()
+		p.startReader()
+	}()
 	for range deleteWorkers {
 		go p.startDeleter()
 	}
@@ -458,7 +466,9 @@ func (p *Pipe) startReader() {
 		seq := nextFetch
 		nextFetch++
 		inFlight++
+		p.readers.Add(1)
 		go func() {
+			defer p.readers.Done()
 			path := p.chunkPath(p.readDir, seq)
 			polled := false
 			var backoff time.Duration // chosen when this fetch starts polling as head

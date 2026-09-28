@@ -69,8 +69,15 @@ func newTestPipe(t *testing.T, dav *WebDAV) *Pipe {
 	if err := p.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	t.Cleanup(p.cancel)
+	t.Cleanup(func() { stopReaders(p) })
 	return p
+}
+
+// stopReaders cancels the pipe and waits for every goroutine that reads the
+// polling globals, so a test can change or restore them without a data race.
+func stopReaders(p *Pipe) {
+	p.cancel()
+	p.readers.Wait()
 }
 
 // pollHead starts the reader and returns how many GETs the head chunk and
@@ -81,6 +88,7 @@ func pollHead(t *testing.T, d time.Duration) (head, ahead int) {
 	p := newTestPipe(t, dav)
 	p.startOnce.Do(p.start)
 	time.Sleep(d)
+	stopReaders(p) // the caller may change the polling globals next
 	for name, n := range c.chunkGets("s2c") {
 		if name == "0000000001.bin" {
 			head = n
