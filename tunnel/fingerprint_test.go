@@ -63,7 +63,7 @@ func TestGoFingerprint(t *testing.T) {
 	defer func() { TLSFingerprint = "chrome" }()
 
 	dav := NewWebDAV("https://example.invalid", "u", "p", time.Second, "")
-	if tr := dav.client.Transport.(*cfTransport).rt.(*http.Transport); tr.DialTLSContext != nil {
+	if tr := dav.client.Transport.(*browserTransport).rt.(*http.Transport); tr.DialTLSContext != nil {
 		t.Error("DialTLSContext set with TLSFingerprint=go")
 	}
 }

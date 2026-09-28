@@ -1,7 +1,11 @@
 package tunnel
 
 import (
+	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -15,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	utls "github.com/refraction-networking/utls"
 )
 
@@ -55,8 +61,12 @@ var TLSFingerprint = "chrome"
 // chromeRootCAs overrides the system roots for the uTLS handshake (tests only).
 var chromeRootCAs *x509.CertPool
 
-// chromeUA must match the Chrome version of the uTLS ClientHello.
-const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+// chromeUA and chromeSecCHUA must match the Chrome version of the uTLS
+// ClientHello.
+const (
+	chromeUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+	chromeSecCHUA = `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`
+)
 
 type WebDAV struct {
 	baseURL  string
@@ -117,22 +127,131 @@ func newWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer
 	} else if TLSFingerprint == "chrome" {
 		transport.DialTLSContext = chromeDialTLS(dialer, 15*time.Second)
 	}
+	var origin string
+	if u, err := url.Parse(baseURL); err == nil {
+		origin = u.Scheme + "://" + u.Host
+	}
 	return &WebDAV{
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		login:    login,
 		password: password,
-		client:   &http.Client{Timeout: timeout, Transport: &cfTransport{rt: transport}},
+		client:   &http.Client{Timeout: timeout, Transport: &browserTransport{rt: transport, origin: origin}},
 	}
 }
 
-type cfTransport struct {
-	rt http.RoundTripper
+// browserTransport dresses every request as a same-origin fetch() from
+// Chrome 133 on Windows — the headers that go with the Chrome User-Agent and
+// ClientHello, to keep the Cloudflare Bot Score and similar checks low — and
+// decodes the response encodings its Accept-Encoding advertises.
+//
+// Header order still differs from Chrome's: net/http writes Host and
+// User-Agent first, then the rest sorted. Only the WebDAV server sees it
+// behind TLS.
+type browserTransport struct {
+	rt     http.RoundTripper
+	origin string // scheme://host of the WebDAV base URL
 }
 
-func (t *cfTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Mimic a regular browser to reduce Cloudflare Bot Score.
-	req.Header.Set("User-Agent", chromeUA)
-	return t.rt.RoundTrip(req)
+func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context()) // a RoundTripper must not modify its request
+	h := req.Header
+	h.Set("Connection", "keep-alive")
+	h.Set("User-Agent", chromeUA)
+	// Chrome sends client hints in lower case; assigning the map directly
+	// keeps net/http from canonicalizing them to Sec-Ch-Ua.
+	h["sec-ch-ua"] = []string{chromeSecCHUA}
+	h["sec-ch-ua-mobile"] = []string{"?0"}
+	h["sec-ch-ua-platform"] = []string{`"Windows"`}
+	if h.Get("Accept") == "" {
+		h.Set("Accept", "*/*")
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodHead && t.origin != "" {
+		h.Set("Origin", t.origin)
+	}
+	h.Set("Sec-Fetch-Site", "same-origin")
+	h.Set("Sec-Fetch-Mode", "cors")
+	h.Set("Sec-Fetch-Dest", "empty")
+	if t.origin != "" {
+		h.Set("Referer", t.origin+"/")
+	}
+	h.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	h.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := t.rt.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	// Setting Accept-Encoding ourselves turns off net/http's transparent
+	// gzip, so decode here.
+	if enc := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); enc != "" && enc != "identity" {
+		resp.Body = &decodingBody{body: resp.Body, enc: enc}
+		resp.Header.Del("Content-Encoding")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = -1
+		resp.Uncompressed = true
+	}
+	return resp, nil
+}
+
+// decodingBody decodes a Content-Encoding lazily, on the first Read, so that
+// empty bodies (204, 304, HEAD) never touch the decoder.
+type decodingBody struct {
+	body     io.ReadCloser
+	enc      string
+	r        io.Reader
+	closeDec func()
+	err      error
+}
+
+func (b *decodingBody) Read(p []byte) (int, error) {
+	if b.r == nil && b.err == nil {
+		b.r, b.closeDec, b.err = newBodyDecoder(b.enc, b.body)
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.r.Read(p)
+}
+
+func (b *decodingBody) Close() error {
+	if b.closeDec != nil {
+		b.closeDec()
+	}
+	return b.body.Close()
+}
+
+func newBodyDecoder(enc string, r io.Reader) (io.Reader, func(), error) {
+	switch enc {
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return zr, func() { zr.Close() }, nil
+	case "deflate":
+		// HTTP "deflate" is zlib-wrapped (RFC 9110), but some servers send
+		// raw DEFLATE; browsers accept both, so sniff the zlib header.
+		br := bufio.NewReader(r)
+		if hdr, err := br.Peek(2); err == nil && hdr[0]&0x0f == 8 && (uint16(hdr[0])<<8|uint16(hdr[1]))%31 == 0 {
+			zr, err := zlib.NewReader(br)
+			if err != nil {
+				return nil, nil, err
+			}
+			return zr, func() { zr.Close() }, nil
+		}
+		fr := flate.NewReader(br)
+		return fr, func() { fr.Close() }, nil
+	case "br":
+		return brotli.NewReader(r), nil, nil
+	case "zstd":
+		zr, err := zstd.NewReader(r, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
+		if err != nil {
+			return nil, nil, err
+		}
+		return zr, zr.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported Content-Encoding %q", enc)
+	}
 }
 
 // chromeDialTLS returns a DialTLSContext that performs a Chrome 133 TLS
@@ -218,7 +337,7 @@ func (w *WebDAV) Get(ctx context.Context, path string) ([]byte, int, error) {
 	}
 	req.SetBasicAuth(w.login, w.password)
 	// Prevent Cloudflare and proxy caches from serving stale 404s.
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	resp, err := w.client.Do(req)
 	if err != nil {
@@ -356,7 +475,7 @@ func (w *WebDAV) Propfind(ctx context.Context, path string, depth string) ([]str
 	req.SetBasicAuth(w.login, w.password)
 	req.Header.Set("Depth", depth)
 	req.Header.Set("Content-Type", "application/xml")
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	resp, err := w.client.Do(req)
 	if err != nil {
