@@ -23,7 +23,8 @@
 | `-webdav-tls-cert` | selfhosted | — | TLS certificate file |
 | `-webdav-tls-key` | selfhosted | — | TLS key file |
 | `-storage-only` | selfhosted | `false` | Serve WebDAV storage only, without running the relay — pair with a separate `-mode server` (or another selfhosted node's `backends:` list) that does the relaying. See [docs/config.md](config.md#self-hosted-multi-backend) |
-| `-poll-max` | all | `500ms` (selfhosted: `200ms`) | Maximum poll interval when idle |
+| `-poll-max` | all | `500ms` (selfhosted: `200ms`) | Maximum poll interval while traffic flows |
+| `-poll-idle` | all | `2s` (selfhosted: `0`, off) | Maximum poll interval after 10 s without traffic, to save requests to rate-limited storage. `0` (or ≤ `-poll-max`) disables. See [docs/tuning.md](tuning.md#idle-polling) |
 | `-poll-min` | all | `200ms` (selfhosted: `50ms`) | Starting poll interval (adaptive backoff) |
 | `-coalesce` | all | `10ms` (selfhosted: `5ms`) | Write coalescing window |
 | `-chunk-size` | all | `131071` | Chunk size in bytes |

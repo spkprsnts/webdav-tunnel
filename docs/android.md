@@ -56,6 +56,7 @@ Configure OkHttp or the system proxy to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `ClearEncrypt()` | Disable encryption (default). |
 | `SetPollMinMs(ms)` | Minimum poll interval in milliseconds (default 200). |
 | `SetPollMaxMs(ms)` | Maximum poll interval in milliseconds (default 500). |
+| `SetPollIdleMs(ms)` | Maximum poll interval after 10 s without traffic (default 2000, `0` disables). |
 | `SetCoalesceMs(ms)` | Write coalescing window in milliseconds (default 10). |
 | `SetChunkSize(n)` | Chunk size in bytes (default 131071). |
 | `SetConcurrentPuts(n)` | Parallel upload limit (default 8). |

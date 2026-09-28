@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	PollInterval       = 500 * time.Millisecond // maximum poll backoff when idle
+	PollInterval       = 500 * time.Millisecond // maximum poll backoff while traffic flows
 	MinPollInterval    = 200 * time.Millisecond // starting poll interval for adaptive backoff
+	PollIdleInterval   = 2 * time.Second        // maximum poll backoff after idleGrace of silence; <= PollInterval disables
 	CoalesceDelay      = 10 * time.Millisecond  // write coalescing window
 	ChunkDataSize      = 128*1024 - 1           // chunk size chosen to avoid cloud timeouts
 	MaxConcurrentPuts  = 8                      // parallel upload limit
@@ -28,15 +29,45 @@ var (
 const (
 	idleTimeout = 90 * time.Second
 
-	heartbeatInterval = 30 * time.Second
-	StaleSessionAge   = 90 * time.Second
-	doneCheckInterval = 3 * time.Second
+	heartbeatInterval     = 30 * time.Second
+	StaleSessionAge       = 90 * time.Second
+	doneCheckInterval     = 3 * time.Second
+	doneCheckIdleInterval = 15 * time.Second
 )
 
 const (
 	headerData byte = 0x00
 	headerEOF  byte = 0x01
 )
+
+// idleGrace is how long a pipe must see no traffic in either direction before
+// polling backs off towards PollIdleInterval. Shorter gaps (a page still
+// loading, a slow server) keep the PollInterval cap. A var for tests.
+var idleGrace = 10 * time.Second
+
+// yamuxHeaderSize is the size of a yamux frame header. yamux writes a frame's
+// header and body separately, and keepalive pings and window updates are
+// header-only, so writes no larger than this are mux housekeeping: they don't
+// hold the pipe out of idle or wake the poller.
+const yamuxHeaderSize = 12
+
+// carriesData reports whether a received chunk holds user traffic rather than
+// only yamux housekeeping (pings, window updates, empty data frames). Chunks
+// are coalesced writes, so an idle one is a run of bare frame headers; anything
+// that doesn't parse as that — e.g. a chunk starting mid-body — counts as data.
+func carriesData(payload []byte) bool {
+	const typeData = 0
+	for len(payload) > 0 {
+		if len(payload) < yamuxHeaderSize || payload[0] != 0 || payload[1] > 3 {
+			return true
+		}
+		if payload[1] == typeData && binary.BigEndian.Uint32(payload[8:12]) > 0 {
+			return true
+		}
+		payload = payload[yamuxHeaderSize:]
+	}
+	return false
+}
 
 type Pipe struct {
 	dav       *WebDAV
@@ -63,6 +94,18 @@ type Pipe struct {
 	wg        sync.WaitGroup
 	putSem    chan struct{}
 
+	// lastActive is the UnixNano time of the last chunk read or write.
+	lastActive atomic.Int64
+	// kick wakes the head poller early when this side writes: a reply is
+	// likely on its way, so polling drops back to MinPollInterval.
+	kick chan struct{}
+
+	// head is the sequence number the reader delivers next. Fetches for later
+	// chunks wait for it (headMoved) instead of polling on their own.
+	head      atomic.Int64
+	headMu    sync.Mutex
+	headMoved chan struct{} // closed and replaced when head advances
+
 	latMu      sync.Mutex
 	latMax     time.Duration
 	latSum     time.Duration
@@ -85,7 +128,11 @@ func NewPipe(dav *WebDAV, sessionID, writeDir, readDir string, encKey []byte) *P
 		readCh:    make(chan []byte, 128),
 		deleteCh:  make(chan string, 1024),
 		putSem:    make(chan struct{}, MaxConcurrentPuts),
+		kick:      make(chan struct{}, 1),
+		headMoved: make(chan struct{}),
 	}
+	p.head.Store(1)
+	p.markActive()
 	// When doneCh closes, cancel the context immediately to abort stalled HTTP requests.
 	go func() {
 		<-p.doneCh
@@ -207,6 +254,9 @@ func (p *Pipe) WatchDone() {
 			}
 
 			wait := doneCheckInterval
+			if p.idle() {
+				wait = doneCheckIdleInterval
+			}
 			var rlErr *rateLimitError
 			if errors.As(err, &rlErr) {
 				wait = rlErr.wait
@@ -411,11 +461,13 @@ func (p *Pipe) startReader() {
 		go func() {
 			path := p.chunkPath(p.readDir, seq)
 			polled := false
-			backoff := MinPollInterval
+			var backoff time.Duration // chosen when this fetch starts polling as head
 			for {
 				if p.ctx.Err() != nil {
 					return
 				}
+				// Taken before the GET so a head move during it isn't missed.
+				headMoved := p.headMovedCh()
 				chunk, status, err := p.dav.Get(p.ctx, path)
 				var rlErr *rateLimitError
 				if errors.As(err, &rlErr) {
@@ -439,17 +491,35 @@ func (p *Pipe) startReader() {
 				}
 				if needRetry {
 					polled = true
-					wait := backoff + time.Duration(rand.Int63n(int64(backoff/2+1)))
-					backoff *= 2
-					if backoff > PollInterval {
-						backoff = PollInterval
+					if seq > p.head.Load() {
+						// While the head chunk is missing this one almost
+						// certainly is too, and it couldn't be delivered
+						// before the head anyway: retry once the head arrives
+						// instead of polling on our own.
+						select {
+						case <-headMoved:
+							backoff = 0 // may have waited long; re-pick below
+							continue
+						case <-p.ctx.Done():
+							return
+						}
 					}
-					select {
-					case <-time.After(wait):
-						continue
-					case <-p.ctx.Done():
+					if backoff == 0 {
+						backoff = MinPollInterval
+						if p.idle() {
+							// Nothing is expected: skip the ramp-up from
+							// MinPollInterval that would follow every
+							// keepalive. A local write still cuts the wait
+							// short (pollWait).
+							backoff = p.pollCap()
+						}
+					}
+					wait := backoff + time.Duration(rand.Int63n(int64(backoff/2+1)))
+					backoff = min(backoff*2, p.pollCap())
+					if !p.pollWait(wait, &backoff) {
 						return
 					}
+					continue
 				}
 				select {
 				case p.deleteCh <- path:
@@ -510,6 +580,10 @@ func (p *Pipe) startReader() {
 				select {
 				case p.readCh <- chunk[9:]:
 					nextSeq++
+					p.advanceHead(nextSeq)
+					if carriesData(chunk[9:]) {
+						p.markActive()
+					}
 				case <-p.ctx.Done():
 					return
 				}
@@ -517,6 +591,60 @@ func (p *Pipe) startReader() {
 			fill()
 		}
 	}
+}
+
+func (p *Pipe) markActive() { p.lastActive.Store(time.Now().UnixNano()) }
+
+// idle reports whether the pipe has seen no traffic for idleGrace.
+func (p *Pipe) idle() bool {
+	return time.Since(time.Unix(0, p.lastActive.Load())) > idleGrace
+}
+
+// pollCap is the ceiling for the head poller's backoff.
+func (p *Pipe) pollCap() time.Duration {
+	if PollIdleInterval > PollInterval && p.idle() {
+		return PollIdleInterval
+	}
+	return PollInterval
+}
+
+// pollWait sleeps before the head chunk is polled again. A local write cuts a
+// long wait down to MinPollInterval and resets the backoff: a reply is likely
+// on its way. Returns false if the pipe is closing.
+func (p *Pipe) pollWait(wait time.Duration, backoff *time.Duration) bool {
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	deadline := time.Now().Add(wait)
+	for {
+		select {
+		case <-t.C:
+			return true
+		case <-p.kick:
+			*backoff = MinPollInterval
+			if time.Until(deadline) > MinPollInterval {
+				t.Reset(MinPollInterval)
+				deadline = time.Now().Add(MinPollInterval)
+			}
+		case <-p.ctx.Done():
+			return false
+		}
+	}
+}
+
+func (p *Pipe) headMovedCh() <-chan struct{} {
+	p.headMu.Lock()
+	defer p.headMu.Unlock()
+	return p.headMoved
+}
+
+// advanceHead publishes the next sequence number to deliver and wakes the
+// fetches waiting for it.
+func (p *Pipe) advanceHead(seq int64) {
+	p.head.Store(seq)
+	p.headMu.Lock()
+	close(p.headMoved)
+	p.headMoved = make(chan struct{})
+	p.headMu.Unlock()
 }
 
 func (p *Pipe) Write(data []byte) (err error) {
@@ -531,6 +659,13 @@ func (p *Pipe) Write(data []byte) (err error) {
 	}
 	buf := make([]byte, len(data))
 	copy(buf, data)
+	if len(data) > yamuxHeaderSize {
+		p.markActive()
+		select {
+		case p.kick <- struct{}{}:
+		default:
+		}
+	}
 	select {
 	case p.writeCh <- buf:
 		return nil

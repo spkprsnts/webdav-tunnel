@@ -158,7 +158,12 @@ func RunServer(pool *BackendPool, proxy *ProxyConfig, healthListen string) {
 			if cooling, _ := backend.inCooldown(); cooling {
 				continue
 			}
-			sessions, err := backend.Dav.ListSessions(context.Background())
+			sessions, err := backend.Dav.ListSessions(context.Background(), func(sid string) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				_, seen := known[backend.Label+"|"+sid]
+				return seen
+			})
 			if err != nil {
 				log.Printf("backend %s: list sessions error: %v", backend.Label, err)
 				var rlErr *rateLimitError

@@ -126,7 +126,7 @@ func TestApplyConfigDoesNotOverrideExplicitFlags(t *testing.T) {
 		timeout: new(time.Duration), encrypt: new(bool),
 		webdavListen: new(string), webdavStorage: new(string),
 		webdavTLSCert: new(string), webdavTLSKey: new(string),
-		pollMin: new(time.Duration), pollMax: new(time.Duration), coalesce: new(time.Duration),
+		pollMin: new(time.Duration), pollMax: new(time.Duration), pollIdle: new(time.Duration), coalesce: new(time.Duration),
 		chunkSize: new(int), puts: new(int), readAheadMin: new(int), readAheadMax: new(int),
 	})
 

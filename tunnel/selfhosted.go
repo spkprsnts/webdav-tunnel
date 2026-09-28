@@ -215,6 +215,7 @@ func selfhostedClientURI(publicBase, login, password string, enc bool, extra []B
 	q := url.Values{}
 	q.Set("poll-min", "200ms")
 	q.Set("poll-max", "500ms")
+	q.Set("poll-idle", "2s")
 	q.Set("coalesce", "10ms")
 	q.Set("chunk-size", strconv.Itoa(ChunkDataSize))
 	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))
@@ -272,6 +273,7 @@ func ClientURI(baseURL, login, password string, enc bool, extra []BackendRef) st
 	q := url.Values{}
 	q.Set("poll-min", MinPollInterval.String())
 	q.Set("poll-max", PollInterval.String())
+	q.Set("poll-idle", PollIdleInterval.String())
 	q.Set("coalesce", CoalesceDelay.String())
 	q.Set("chunk-size", strconv.Itoa(ChunkDataSize))
 	q.Set("puts", strconv.Itoa(MaxConcurrentPuts))

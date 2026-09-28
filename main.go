@@ -42,7 +42,8 @@ func main() {
 	storageOnly := flag.Bool("storage-only", false, "selfhosted mode: serve WebDAV storage only, don't run the relay — use as a backend for a separate -mode server with a backends: list")
 
 	encrypt := flag.Bool("enc", false, "encrypt tunnel data with AES-256-GCM (key derived from each backend's WebDAV password)")
-	pollMax := flag.Duration("poll-max", tunnel.PollInterval, "maximum poll interval when idle")
+	pollMax := flag.Duration("poll-max", tunnel.PollInterval, "maximum poll interval while traffic flows")
+	pollIdle := flag.Duration("poll-idle", tunnel.PollIdleInterval, "maximum poll interval after 10s without traffic, to save requests; 0 (or <= poll-max) disables")
 	pollMin := flag.Duration("poll-min", tunnel.MinPollInterval, "starting poll interval (adaptive backoff)")
 	coalesce := flag.Duration("coalesce", tunnel.CoalesceDelay, "write coalescing window")
 	chunkSize := flag.Int("chunk-size", tunnel.ChunkDataSize, "chunk size in bytes")
@@ -77,7 +78,7 @@ func main() {
 			tlsFingerprint: tlsFingerprint,
 			webdavListen:   webdavListen, webdavStorage: webdavStorage,
 			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey, storageOnly: storageOnly,
-			pollMin: pollMin, pollMax: pollMax, coalesce: coalesce,
+			pollMin: pollMin, pollMax: pollMax, pollIdle: pollIdle, coalesce: coalesce,
 			chunkSize: chunkSize, puts: puts, readAheadMin: readAheadMin, readAheadMax: readAheadMax,
 		})
 		cfgBackends = cfg.Backends
@@ -97,6 +98,12 @@ func main() {
 		if !explicit["coalesce"] {
 			*coalesce = 5 * time.Millisecond
 		}
+		// Idle backoff saves requests to rate-limited third-party storage;
+		// polling our own storage costs nothing, so keep first-request
+		// latency after a pause low instead.
+		if !explicit["poll-idle"] {
+			*pollIdle = 0
+		}
 	}
 
 	// Client with -uri: parse credentials and apply tuning from query params
@@ -110,6 +117,9 @@ func main() {
 		}
 		if v := parseDurParam(q, "poll-max"); v != nil && !explicit["poll-max"] {
 			*pollMax = *v
+		}
+		if v := parseDurParam(q, "poll-idle"); v != nil && !explicit["poll-idle"] {
+			*pollIdle = *v
 		}
 		if v := parseDurParam(q, "coalesce"); v != nil && !explicit["coalesce"] {
 			*coalesce = *v
@@ -136,6 +146,7 @@ func main() {
 
 	tunnel.PollInterval = *pollMax
 	tunnel.MinPollInterval = *pollMin
+	tunnel.PollIdleInterval = *pollIdle
 	tunnel.CoalesceDelay = *coalesce
 	tunnel.ChunkDataSize = *chunkSize
 	tunnel.MaxConcurrentPuts = *puts
@@ -193,7 +204,7 @@ type configFlags struct {
 	encrypt, storageOnly                        *bool
 	webdavListen, webdavStorage                 *string
 	webdavTLSCert, webdavTLSKey                 *string
-	pollMin, pollMax, coalesce                  *time.Duration
+	pollMin, pollMax, pollIdle, coalesce        *time.Duration
 	chunkSize, puts, readAheadMin, readAheadMax *int
 }
 
@@ -250,6 +261,7 @@ func applyConfig(cfg *Config, explicit map[string]bool, f configFlags) {
 	}
 	setDur(f.pollMin, "poll-min", cfg.Tuning.PollMin)
 	setDur(f.pollMax, "poll-max", cfg.Tuning.PollMax)
+	setDur(f.pollIdle, "poll-idle", cfg.Tuning.PollIdle)
 	setDur(f.coalesce, "coalesce", cfg.Tuning.Coalesce)
 	setInt(f.chunkSize, "chunk-size", cfg.Tuning.ChunkSize)
 	setInt(f.puts, "puts", cfg.Tuning.Puts)

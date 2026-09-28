@@ -19,7 +19,7 @@ After startup the server prints a ready-to-use client URI:
 
 ```
 selfhosted: ════════════════════════════════════════════════════
-selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=10ms&poll-max=500ms&poll-min=200ms&puts=8&read-max=8&read-min=3
+selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=10ms&poll-idle=2s&poll-max=500ms&poll-min=200ms&puts=8&read-max=8&read-min=3
 selfhosted: ════════════════════════════════════════════════════
 ```
 
@@ -185,7 +185,7 @@ All tuning parameters can be embedded in the URI query string. The client applie
 webdav-tunnel -mode client -uri "webdav://..." -socks-listen 127.0.0.1:1080 -poll-max 200ms
 ```
 
-Supported query parameters: `poll-min`, `poll-max`, `coalesce`, `chunk-size`, `puts`, `read-min`, `read-max`, `enc`.
+Supported query parameters: `poll-min`, `poll-max`, `poll-idle`, `coalesce`, `chunk-size`, `puts`, `read-min`, `read-max`, `enc`.
 
 ### Multiple backends in one URI
 

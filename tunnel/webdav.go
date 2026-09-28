@@ -524,17 +524,18 @@ func (w *WebDAV) SessionAge(ctx context.Context, sid string) time.Duration {
 	return time.Since(time.Unix(ts, 0))
 }
 
-// ListSessions returns session IDs found under the tunnel/ directory.
+// ListSessions returns new session IDs found under the tunnel/ directory.
 // Only sessions with an init file are returned — that file signals the client
-// has finished Init() and all subdirectories are ready.
-func (w *WebDAV) ListSessions(ctx context.Context) ([]string, error) {
+// has finished Init() and all subdirectories are ready. IDs for which skip
+// returns true are left out without checking their init file.
+func (w *WebDAV) ListSessions(ctx context.Context, skip func(id string) bool) ([]string, error) {
 	hrefs, err := w.Propfind(ctx, "tunnel", "1")
 	if err != nil || hrefs == nil {
 		return nil, err
 	}
 	var candidates []string
 	for _, href := range hrefs {
-		if id := lastPathSegment(href); id != "" && id != "tunnel" {
+		if id := lastPathSegment(href); id != "" && id != "tunnel" && !skip(id) {
 			candidates = append(candidates, id)
 		}
 	}

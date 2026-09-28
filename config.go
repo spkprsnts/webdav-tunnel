@@ -56,6 +56,7 @@ type BackendConfig struct {
 type TuningConfig struct {
 	PollMin   *Duration `yaml:"poll-min"`
 	PollMax   *Duration `yaml:"poll-max"`
+	PollIdle  *Duration `yaml:"poll-idle"`
 	Coalesce  *Duration `yaml:"coalesce"`
 	ChunkSize *int      `yaml:"chunk-size"`
 	Puts      *int      `yaml:"puts"`

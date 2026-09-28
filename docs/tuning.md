@@ -6,7 +6,8 @@ Self-hosted mode automatically applies aggressive defaults (fast local disk, no 
 
 | Parameter | What it controls |
 |-----------|-----------------|
-| `-poll-min` / `-poll-max` | Adaptive polling backoff range. Lower values reduce latency; higher values reduce API call rate when idle. |
+| `-poll-min` / `-poll-max` | Adaptive polling backoff range while traffic flows. Lower values reduce latency; higher values reduce the API call rate. |
+| `-poll-idle` | Polling ceiling once the tunnel has been quiet for 10 s. See [Idle polling](#idle-polling). |
 | `-coalesce` | Window during which small writes are batched into one chunk. Lower = less latency, higher = fewer chunks. |
 | `-chunk-size` | Size of each uploaded file in bytes. Larger chunks mean fewer round-trips but higher memory use per stream. |
 | `-puts` | Number of chunks uploaded in parallel. Increase on high-bandwidth, low-latency connections. |
@@ -32,6 +33,17 @@ The server prints a client URI with its current settings embedded, so you can ba
 webdav-tunnel -mode server ... -poll-min 50ms -poll-max 100ms -chunk-size 1048575
 # server: client -uri  webdav://...?chunk-size=1048575&poll-max=100ms&poll-min=50ms&...
 ```
+
+## Idle polling
+
+Each side polls WebDAV for the other side's next chunk, so an open tunnel makes requests even with nothing to carry. To keep that low on rate-limited third-party storage:
+
+- Only the next chunk in sequence is polled. Read-ahead fetches for later chunks wait until it arrives, then retry at once.
+- After 10 s without user traffic in either direction, polling backs off up to `-poll-idle` (default `2s`). yamux keepalives and window updates don't count as traffic.
+- When a side sends data, its own polling drops straight back to `-poll-min`, since a reply is on its way. So the only added latency is on the first request after a pause: the server notices it within one idle poll (up to `-poll-idle` plus jitter). Replies aren't delayed.
+- Selfhosted servers poll their own local storage, so they default to `-poll-idle 0` (off) and add no latency. The client URI they print still carries `poll-idle=2s` for the client side, which is woken by its own requests.
+
+With default settings an idle tunnel makes roughly 110 requests a minute, down from about 700. Set `-poll-idle 0` to trade that back for the lowest latency after pauses.
 
 ## Notes
 

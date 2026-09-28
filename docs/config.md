@@ -48,6 +48,7 @@ backends:
 tuning:
   poll-min: 50ms
   poll-max: 200ms
+  poll-idle: 2s
   coalesce: 5ms
   chunk-size: 131071
   puts: 8

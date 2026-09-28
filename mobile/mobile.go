@@ -82,6 +82,12 @@ func IsRunning() bool {
 // SetPollMaxMs sets the maximum poll interval in milliseconds (default 500).
 func SetPollMaxMs(ms int) { tunnel.PollInterval = time.Duration(ms) * time.Millisecond }
 
+// SetPollIdleMs sets the maximum poll interval in milliseconds once the
+// tunnel has carried no traffic for 10 s (default 2000). It trades a little
+// latency on the first request after a pause for far fewer requests to the
+// WebDAV storage while idle; 0 disables it.
+func SetPollIdleMs(ms int) { tunnel.PollIdleInterval = time.Duration(ms) * time.Millisecond }
+
 // SetPollMinMs sets the starting poll interval in milliseconds (default 200).
 func SetPollMinMs(ms int) { tunnel.MinPollInterval = time.Duration(ms) * time.Millisecond }
 
