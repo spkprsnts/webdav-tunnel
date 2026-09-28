@@ -19,11 +19,13 @@ After startup the server prints a ready-to-use client URI:
 
 ```
 selfhosted: ════════════════════════════════════════════════════
-selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=5ms&poll-max=100ms&poll-min=50ms&puts=16&read-max=16&read-min=3
+selfhosted: client -uri  webdav://myuser:mypass@YOUR_SERVER_IP:8080?chunk-size=131071&coalesce=10ms&poll-max=500ms&poll-min=200ms&puts=8&read-max=8&read-min=3
 selfhosted: ════════════════════════════════════════════════════
 ```
 
 Replace `YOUR_SERVER_IP` with the server's public IP or hostname.
+
+The poll settings in the URI are network-safe defaults for a remote client, not the faster values the server uses to poll its own local storage (see [flags.md](flags.md)); chunk and concurrency settings are copied from the server.
 
 **Client** — paste the URI from the server output:
 ```sh
