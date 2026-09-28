@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -335,4 +336,25 @@ func TestUDPRelayUpstreamWithoutUDP(t *testing.T) {
 func isTimeout(err error) bool {
 	ne, ok := err.(net.Error)
 	return ok && ne.Timeout()
+}
+
+func TestUDPRelayAddr(t *testing.T) {
+	remote := netip.MustParseAddr("203.0.113.7")
+	local := netip.MustParseAddr("127.0.0.1")
+	cases := []struct {
+		bnd   string
+		proxy netip.Addr
+		want  string
+	}{
+		{"198.51.100.1", remote, "198.51.100.1:5000"}, // reported address is used as is
+		{"0.0.0.0", remote, "203.0.113.7:5000"},       // listening on all interfaces
+		{"127.0.0.1", remote, "203.0.113.7:5000"},     // xray's default "ip" on a remote proxy
+		{"127.0.0.1", local, "127.0.0.1:5000"},        // a local proxy really is on loopback
+		{"proxy.example", remote, "203.0.113.7:5000"}, // hostname
+	}
+	for _, c := range cases {
+		if got := udpRelayAddr(c.bnd, 5000, c.proxy).String(); got != c.want {
+			t.Errorf("udpRelayAddr(%s, proxy %s) = %s, want %s", c.bnd, c.proxy, got, c.want)
+		}
+	}
 }

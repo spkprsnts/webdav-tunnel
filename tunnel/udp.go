@@ -134,8 +134,12 @@ func serveUDPRelay(id int64, stream net.Conn, proxy *ProxyConfig) {
 		via string
 	)
 	if proxy != nil {
-		out, err = dialSocks5UDP(proxy)
 		via = " via " + proxy.addr
+		var u *socks5UDP
+		if u, err = dialSocks5UDP(proxy); err == nil {
+			out = u
+			via += " (relay " + u.String() + ")"
+		}
 	} else {
 		out, err = newDirectUDP()
 	}
@@ -238,13 +242,8 @@ func dialSocks5UDP(proxy *ProxyConfig) (*socks5UDP, error) {
 	}
 	ctrl.SetDeadline(time.Time{})
 
-	// A proxy listening on all interfaces often reports 0.0.0.0 (or a
-	// hostname); its relay is then reachable at the address we reached it on.
-	relayIP, err := netip.ParseAddr(bndHost)
-	if err != nil || relayIP.IsUnspecified() {
-		relayIP = ctrl.RemoteAddr().(*net.TCPAddr).AddrPort().Addr()
-	}
-	pc, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(relayIP.Unmap(), bndPort)))
+	relay := udpRelayAddr(bndHost, bndPort, ctrl.RemoteAddr().(*net.TCPAddr).AddrPort().Addr())
+	pc, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(relay))
 	if err != nil {
 		ctrl.Close()
 		return nil, err
@@ -258,6 +257,23 @@ func dialSocks5UDP(proxy *ProxyConfig) (*socks5UDP, error) {
 	}()
 	return u, nil
 }
+
+// udpRelayAddr picks where to send datagrams for a UDP ASSOCIATE reply of
+// bndHost:bndPort from a proxy reached at proxyIP. Proxies often report an
+// address that only makes sense on their own host — 0.0.0.0 when listening on
+// all interfaces, 127.0.0.1 by default in xray — or a hostname; the relay is
+// then assumed to be at the proxy's own address.
+func udpRelayAddr(bndHost string, bndPort uint16, proxyIP netip.Addr) netip.AddrPort {
+	proxyIP = proxyIP.Unmap()
+	ip, err := netip.ParseAddr(bndHost)
+	if err != nil || ip.IsUnspecified() || (ip.IsLoopback() && !proxyIP.IsLoopback()) {
+		ip = proxyIP
+	}
+	return netip.AddrPortFrom(ip.Unmap(), bndPort)
+}
+
+// String names the relay in logs.
+func (u *socks5UDP) String() string { return u.pc.RemoteAddr().String() }
 
 func (u *socks5UDP) Send(frame []byte) {
 	// Our frames already are SOCKS5 UDP datagrams minus RSV/FRAG.
