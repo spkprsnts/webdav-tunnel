@@ -197,6 +197,20 @@ A server started with multiple `-config` backends prints a URI in this form auto
 
 ---
 
+## UDP
+
+The client's SOCKS5 proxy supports **UDP ASSOCIATE** (RFC 1928 §7):
+
+- **DNS** (port 53) is converted to DNS-over-TCP (RFC 1035) and sent one query per stream. This works with any server version.
+- **All other UDP** shares one tunnel stream per association. The server opens one UDP socket for it and relays datagrams both ways; replies from any peer are forwarded back. Destinations given as hostnames are resolved on the server, and replies carry the hostname as their source address.
+
+Limitations:
+
+- Latency is the tunnel's latency (tens to hundreds of ms per direction, see [tuning.md](tuning.md)). Voice, video calls and games will work, but noticeably worse than over a direct connection.
+- Fragmented SOCKS5 datagrams (`FRAG != 0`) are dropped.
+- UDP is not available when the server uses an upstream proxy (`-proxy`): the upstream SOCKS5 client is TCP-only. Non-DNS datagrams are then dropped; DNS still works.
+- Servers older than this feature drop non-DNS UDP too. Update the server to enable it.
+
 ## Advanced scenarios
 
 ### SOCKS5 authentication on the client

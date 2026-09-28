@@ -62,8 +62,6 @@ Configure OkHttp or the system proxy to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `SetReadAheadMin(n)` | Minimum prefetch GETs (default 3). |
 | `SetReadAheadMax(n)` | Maximum prefetch GETs (default 8). |
 
-## DNS support
+## UDP and DNS support
 
-The SOCKS5 server supports the **UDP ASSOCIATE** command (RFC 1928 §7). DNS queries (port 53) are forwarded through the WebDAV tunnel as DNS-over-TCP (RFC 1035). Other UDP traffic is dropped.
-
-This lets SOCKS5-aware DNS clients resolve names through the tunnel without additional setup.
+The SOCKS5 server supports the **UDP ASSOCIATE** command (RFC 1928 §7), so UDP apps and tun2socks-style VPN front-ends work through the tunnel. See [modes.md#udp](modes.md#udp) for details and limitations.

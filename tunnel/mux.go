@@ -115,7 +115,7 @@ func proxyStream(ctx context.Context, mux *yamux.Session, conn net.Conn, preOpen
 		return
 	}
 
-	if cmd == 0x03 { // UDP ASSOCIATE — DNS relay over TCP tunnel
+	if cmd == 0x03 { // UDP ASSOCIATE
 		if preOpened != nil {
 			preOpened.Close()
 		}
@@ -156,8 +156,9 @@ func proxyStream(ctx context.Context, mux *yamux.Session, conn net.Conn, preOpen
 }
 
 // handleUDPAssociate implements SOCKS5 UDP ASSOCIATE (RFC 1928 §7).
-// Only DNS (port 53) datagrams are forwarded — each query is converted to
-// DNS-over-TCP (RFC 1035) and sent through the yamux tunnel.
+// DNS (port 53) datagrams are converted to DNS-over-TCP (RFC 1035) and sent
+// through the yamux tunnel one stream per query. All other datagrams share one
+// UDP relay stream per association (see udp.go), opened on first use.
 // The TCP control connection (conn) must stay alive while the relay runs;
 // closing it (or cancelling ctx) tears down the UDP socket.
 func handleUDPAssociate(ctx context.Context, conn net.Conn, mux *yamux.Session) {
@@ -174,17 +175,7 @@ func handleUDPAssociate(ctx context.Context, conn net.Conn, mux *yamux.Session) 
 	defer pc.Close()
 
 	udpPort := pc.LocalAddr().(*net.UDPAddr).Port
-	var resp []byte
-	if ip4 := localIP.To4(); ip4 != nil {
-		resp = []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-		copy(resp[4:8], ip4)
-		binary.BigEndian.PutUint16(resp[8:10], uint16(udpPort))
-	} else {
-		resp = make([]byte, 22)
-		resp[0], resp[1], resp[2], resp[3] = 0x05, 0x00, 0x00, 0x04
-		copy(resp[4:20], localIP.To16())
-		binary.BigEndian.PutUint16(resp[20:22], uint16(udpPort))
-	}
+	resp := appendSocksAddr([]byte{0x05, 0x00, 0x00}, localIP.String(), uint16(udpPort))
 	if _, err := conn.Write(resp); err != nil {
 		return
 	}
@@ -203,6 +194,17 @@ func handleUDPAssociate(ctx context.Context, conn net.Conn, mux *yamux.Session) 
 		pc.Close()
 	}()
 
+	var (
+		relay      net.Conn     // UDP relay stream, opened on the first non-DNS datagram
+		relayDead  atomic.Bool  // server refused or closed it — drop non-DNS from now on
+		clientAddr atomic.Value // net.Addr of the SOCKS5 client, for replies
+	)
+	defer func() {
+		if relay != nil {
+			relay.Close()
+		}
+	}()
+
 	buf := make([]byte, 65536)
 	for {
 		n, src, err := pc.ReadFrom(buf)
@@ -214,45 +216,65 @@ func handleUDPAssociate(ctx context.Context, conn net.Conn, mux *yamux.Session) 
 		if len(pkt) < 4 || pkt[2] != 0 { // drop fragmented or malformed
 			continue
 		}
-		var dstHost string
-		var dstPort uint16
-		var dataOff int
-		switch pkt[3] {
-		case 0x01: // IPv4
-			if len(pkt) < 10 {
-				continue
-			}
-			dstHost = net.IP(pkt[4:8]).String()
-			dstPort = binary.BigEndian.Uint16(pkt[8:10])
-			dataOff = 10
-		case 0x03: // domain
-			if len(pkt) < 5 {
-				continue
-			}
-			dl := int(pkt[4])
-			if len(pkt) < 5+dl+2 {
-				continue
-			}
-			dstHost = string(pkt[5 : 5+dl])
-			dstPort = binary.BigEndian.Uint16(pkt[5+dl : 5+dl+2])
-			dataOff = 5 + dl + 2
-		case 0x04: // IPv6
-			if len(pkt) < 22 {
-				continue
-			}
-			dstHost = net.IP(pkt[4:20]).String()
-			dstPort = binary.BigEndian.Uint16(pkt[20:22])
-			dataOff = 22
-		default:
+		dstHost, dstPort, addrLen, ok := parseSocksAddr(pkt[3:])
+		if !ok {
 			continue
 		}
-		if dstPort != 53 {
-			continue // only DNS is forwarded; other UDP is dropped
+		clientAddr.Store(src)
+
+		if dstPort == 53 {
+			query := make([]byte, n-3-addrLen)
+			copy(query, pkt[3+addrLen:])
+			go relayDNS(pc, src, mux, dstHost, dstPort, query)
+			continue
 		}
-		query := make([]byte, n-dataOff)
-		copy(query, pkt[dataOff:])
-		go relayDNS(pc, src, mux, dstHost, dstPort, query)
+
+		if relayDead.Load() {
+			continue
+		}
+		if relay == nil {
+			relay, err = openUDPRelay(mux, pc, &clientAddr, &relayDead)
+			if err != nil {
+				relayDead.Store(true)
+				continue
+			}
+		}
+		if err := writeUDPFrame(relay, pkt[3:]); err != nil {
+			relayDead.Store(true)
+		}
 	}
+}
+
+// openUDPRelay opens the client end of a UDP relay stream and starts
+// forwarding replies to the SOCKS5 client. When the stream ends it sets dead.
+func openUDPRelay(mux *yamux.Session, pc net.PacketConn, clientAddr *atomic.Value, dead *atomic.Bool) (net.Conn, error) {
+	stream, err := mux.Open()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeStreamTarget(stream, udpStreamMarker, 0); err != nil {
+		stream.Close()
+		return nil, err
+	}
+
+	id := streamCounter.Add(1)
+	log.Printf("[s%d] UDP relay opened", id)
+
+	go func() {
+		defer stream.Close()
+		// [3 RSV/FRAG][frame]: frames already carry the SOCKS5 address.
+		buf := make([]byte, 3+maxUDPFrame)
+		for {
+			n, err := readUDPFrame(stream, buf[3:])
+			if err != nil {
+				break
+			}
+			pc.WriteTo(buf[:3+n], clientAddr.Load().(net.Addr))
+		}
+		dead.Store(true)
+		log.Printf("[s%d] UDP relay closed", id)
+	}()
+	return stream, nil
 }
 
 // relayDNS converts one UDP DNS query to DNS-over-TCP (RFC 1035 §4.2.2),
@@ -286,27 +308,8 @@ func relayDNS(pc net.PacketConn, clientAddr net.Addr, mux *yamux.Session, host s
 		return
 	}
 
-	// Build SOCKS5 UDP response header with the DNS server as source address.
-	var hdr []byte
-	if ip := net.ParseIP(host); ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			hdr = []byte{0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0}
-			copy(hdr[4:8], ip4)
-			binary.BigEndian.PutUint16(hdr[8:10], port)
-		} else {
-			hdr = make([]byte, 22)
-			hdr[3] = 0x04
-			copy(hdr[4:20], ip.To16())
-			binary.BigEndian.PutUint16(hdr[20:22], port)
-		}
-	} else {
-		hdr = make([]byte, 4+1+len(host)+2)
-		hdr[3] = 0x03
-		hdr[4] = byte(len(host))
-		copy(hdr[5:], host)
-		binary.BigEndian.PutUint16(hdr[4+1+len(host):], port)
-	}
-
+	// SOCKS5 UDP response header with the DNS server as source address.
+	hdr := appendSocksAddr([]byte{0, 0, 0}, host, port)
 	pc.WriteTo(append(hdr, ans...), clientAddr)
 }
 
@@ -356,6 +359,14 @@ func serverStream(stream net.Conn, proxy *ProxyConfig) {
 
 	h, p, err := readStreamTarget(stream)
 	if err != nil {
+		return
+	}
+	if h == udpStreamMarker {
+		if proxy != nil {
+			log.Printf("[s%d] UDP relay refused: upstream SOCKS5 proxy is TCP-only", id)
+			return
+		}
+		serveUDPRelay(id, stream)
 		return
 	}
 	host := h

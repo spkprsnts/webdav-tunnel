@@ -48,7 +48,7 @@ Configure your browser or app to use `127.0.0.1:1080` as a SOCKS5 proxy.
 
 ## Documentation
 
-- [Modes](docs/modes.md) — selfhosted, external WebDAV, client URI format, advanced scenarios
+- [Modes](docs/modes.md) — selfhosted, external WebDAV, client URI format, UDP, advanced scenarios
 - [Config](docs/config.md) — YAML config file, multi-backend WebDAV rotation
 - [Health](docs/health.md) — JSON status endpoint (`-health-listen`)
 - [Releases](docs/release.md) — automatic versioning and the release pipeline
