@@ -210,7 +210,7 @@ Limitations:
 
 - Latency is the tunnel's latency (tens to hundreds of ms per direction, see [tuning.md](tuning.md)). Voice, video calls and games will work, but noticeably worse than over a direct connection.
 - Fragmented SOCKS5 datagrams (`FRAG != 0`) are dropped.
-- UDP is not available when the server uses an upstream proxy (`-proxy`): the upstream SOCKS5 client is TCP-only. Non-DNS datagrams are then dropped; DNS still works.
+- With an upstream proxy (`-proxy`), UDP goes through the proxy's **UDP ASSOCIATE**, never around it. The proxy must support that — see [below](#route-server-traffic-through-an-upstream-socks5-proxy). If it doesn't, non-DNS datagrams are dropped; DNS still works.
 - Servers older than this feature drop non-DNS UDP too. Update the server to enable it.
 
 ## Advanced scenarios
@@ -238,3 +238,18 @@ webdav-tunnel -mode server ... \
 webdav-tunnel -mode server ... \
   -proxy socks5://user:pass@proxy.example.com:1080
 ```
+
+TCP goes through the proxy with `CONNECT`. [UDP](#udp) goes through its `UDP ASSOCIATE`: one association per client association, with datagrams sent to the relay address the proxy reports (or to the proxy's own address, if it reports `0.0.0.0`). Proxies without UDP support — Tor, `ssh -D`, many commercial SOCKS5 services — refuse it; the server then drops non-DNS UDP rather than sending it around the proxy.
+
+With **xray** as the upstream, enable UDP on its SOCKS inbound:
+
+```json
+{
+  "protocol": "socks",
+  "listen": "127.0.0.1",
+  "port": 1080,
+  "settings": { "auth": "noauth", "udp": true }
+}
+```
+
+If xray runs on another host, make sure the relay address it reports (the inbound's `ip` setting) is reachable from the tunnel server. The UDP leg between the tunnel server and the proxy is plain, unauthenticated UDP — SOCKS5 authenticates only the TCP control connection.

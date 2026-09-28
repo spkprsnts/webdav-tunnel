@@ -362,11 +362,7 @@ func serverStream(stream net.Conn, proxy *ProxyConfig) {
 		return
 	}
 	if h == udpStreamMarker {
-		if proxy != nil {
-			log.Printf("[s%d] UDP relay refused: upstream SOCKS5 proxy is TCP-only", id)
-			return
-		}
-		serveUDPRelay(id, stream)
+		serveUDPRelay(id, stream, proxy)
 		return
 	}
 	host := h

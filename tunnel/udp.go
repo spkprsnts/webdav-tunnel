@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -114,54 +115,176 @@ func appendSocksAddr(dst []byte, host string, port uint16) []byte {
 
 // ── server ────────────────────────────────────────────────────────────────────
 
+// udpOutbound is where the server sends an association's datagrams: straight
+// to the internet, or through the upstream SOCKS5 proxy. Frames are
+// [ATYP][ADDR][2 PORT][DATA] in both directions.
+type udpOutbound interface {
+	Send(frame []byte)
+	// Recv returns the next reply frame, valid until the following call.
+	Recv() ([]byte, error)
+	Close() error
+}
+
 // serveUDPRelay runs the server end of one UDP association until the stream
-// closes.
-func serveUDPRelay(id int64, stream net.Conn) {
-	pc, err := net.ListenUDP("udp", nil)
+// closes. With proxy set, datagrams go through its UDP ASSOCIATE.
+func serveUDPRelay(id int64, stream net.Conn, proxy *ProxyConfig) {
+	var (
+		out udpOutbound
+		err error
+		via string
+	)
+	if proxy != nil {
+		out, err = dialSocks5UDP(proxy)
+		via = " via " + proxy.addr
+	} else {
+		out, err = newDirectUDP()
+	}
 	if err != nil {
-		log.Printf("[s%d] UDP relay listen failed: %v", id, err)
+		log.Printf("[s%d] UDP relay unavailable%s: %v", id, via, err)
 		return
 	}
-	defer pc.Close()
-	log.Printf("[s%d] UDP relay opened", id)
-
-	res := newUDPResolver()
+	defer out.Close()
+	log.Printf("[s%d] UDP relay opened%s", id, via)
 
 	// stream → internet
 	go func() {
-		defer pc.Close() // unblocks the reader below
+		defer out.Close() // unblocks Recv below
 		buf := make([]byte, maxUDPFrame)
 		for {
 			n, err := readUDPFrame(stream, buf)
 			if err != nil {
 				return
 			}
-			host, port, off, ok := parseSocksAddr(buf[:n])
-			if !ok {
-				continue
-			}
-			ip, err := res.resolve(host)
-			if err != nil {
-				continue
-			}
-			pc.WriteToUDPAddrPort(buf[off:n], netip.AddrPortFrom(ip, port))
+			out.Send(buf[:n])
 		}
 	}()
 
 	// internet → stream
-	buf := make([]byte, maxUDPFrame)
 	for {
-		n, from, err := pc.ReadFromUDPAddrPort(buf)
+		frame, err := out.Recv()
 		if err != nil {
 			break
 		}
-		frame := appendSocksAddr(nil, res.name(from.Addr().Unmap()), from.Port())
-		frame = append(frame, buf[:n]...)
 		if err := writeUDPFrame(stream, frame); err != nil {
 			break
 		}
 	}
 	log.Printf("[s%d] UDP relay closed", id)
+}
+
+// directUDP sends from one local UDP socket and forwards replies from any peer.
+type directUDP struct {
+	pc  *net.UDPConn
+	res *udpResolver
+	buf []byte
+}
+
+func newDirectUDP() (*directUDP, error) {
+	pc, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, err
+	}
+	return &directUDP{pc: pc, res: newUDPResolver(), buf: make([]byte, maxUDPFrame)}, nil
+}
+
+func (d *directUDP) Send(frame []byte) {
+	host, port, off, ok := parseSocksAddr(frame)
+	if !ok {
+		return
+	}
+	ip, err := d.res.resolve(host)
+	if err != nil {
+		return
+	}
+	d.pc.WriteToUDPAddrPort(frame[off:], netip.AddrPortFrom(ip, port))
+}
+
+func (d *directUDP) Recv() ([]byte, error) {
+	n, from, err := d.pc.ReadFromUDPAddrPort(d.buf)
+	if err != nil {
+		return nil, err
+	}
+	frame := appendSocksAddr(nil, d.res.name(from.Addr().Unmap()), from.Port())
+	return append(frame, d.buf[:n]...), nil
+}
+
+func (d *directUDP) Close() error { return d.pc.Close() }
+
+// socks5UDP relays through an upstream SOCKS5 proxy's UDP ASSOCIATE
+// (RFC 1928 §7). The association lives as long as the TCP control connection.
+type socks5UDP struct {
+	ctrl net.Conn
+	pc   *net.UDPConn // connected to the proxy's UDP relay
+	buf  []byte
+}
+
+func dialSocks5UDP(proxy *ProxyConfig) (*socks5UDP, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ctrl, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxy.addr)
+	if err != nil {
+		return nil, fmt.Errorf("connect to SOCKS5 proxy %s: %w", proxy.addr, err)
+	}
+	ctrl.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := socks5ClientAuth(ctrl, proxy.user, proxy.pass); err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+	// We don't know which address we'll send from, so ask for any (0.0.0.0:0).
+	bndHost, bndPort, err := socks5ClientRequest(ctrl, 0x03, []byte{0x01, 0, 0, 0, 0, 0, 0})
+	if err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+	ctrl.SetDeadline(time.Time{})
+
+	// A proxy listening on all interfaces often reports 0.0.0.0 (or a
+	// hostname); its relay is then reachable at the address we reached it on.
+	relayIP, err := netip.ParseAddr(bndHost)
+	if err != nil || relayIP.IsUnspecified() {
+		relayIP = ctrl.RemoteAddr().(*net.TCPAddr).AddrPort().Addr()
+	}
+	pc, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(relayIP.Unmap(), bndPort)))
+	if err != nil {
+		ctrl.Close()
+		return nil, err
+	}
+
+	u := &socks5UDP{ctrl: ctrl, pc: pc, buf: make([]byte, 3+maxUDPFrame)}
+	// The proxy ends the association by closing the control connection.
+	go func() {
+		io.Copy(io.Discard, ctrl)
+		pc.Close()
+	}()
+	return u, nil
+}
+
+func (u *socks5UDP) Send(frame []byte) {
+	// Our frames already are SOCKS5 UDP datagrams minus RSV/FRAG.
+	pkt := make([]byte, 3+len(frame))
+	copy(pkt[3:], frame)
+	u.pc.Write(pkt)
+}
+
+func (u *socks5UDP) Recv() ([]byte, error) {
+	for {
+		n, err := u.pc.Read(u.buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil, err
+			}
+			continue // e.g. ECONNREFUSED from an ICMP error on the connected socket
+		}
+		if n < 4 || u.buf[2] != 0 { // malformed or fragmented
+			continue
+		}
+		return u.buf[3:n], nil
+	}
+}
+
+func (u *socks5UDP) Close() error {
+	u.ctrl.Close()
+	return u.pc.Close()
 }
 
 // udpResolver caches hostname lookups for one association and remembers which

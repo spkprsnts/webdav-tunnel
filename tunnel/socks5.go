@@ -154,6 +154,22 @@ func dialViaSocks5(ctx context.Context, proxy *ProxyConfig, targetHost, targetPo
 
 // socks5Connect performs the client-side SOCKS5 handshake and sends a CONNECT command.
 func socks5Connect(conn net.Conn, user, pass, host, port string) error {
+	if err := socks5ClientAuth(conn, user, pass); err != nil {
+		return err
+	}
+	// Send the hostname (ATYP=0x03) so DNS is resolved on the proxy.
+	portNum, _ := strconv.Atoi(port)
+	addr := make([]byte, 0, 4+len(host))
+	addr = append(addr, 0x03, byte(len(host)))
+	addr = append(addr, host...)
+	addr = append(addr, byte(portNum>>8), byte(portNum&0xff))
+	_, _, err := socks5ClientRequest(conn, 0x01, addr)
+	return err
+}
+
+// socks5ClientAuth performs the client-side greeting and, if the proxy asks
+// for it, RFC 1929 username/password authentication.
+func socks5ClientAuth(conn net.Conn, user, pass string) error {
 	// Offer no-auth; also offer username/password if credentials are provided.
 	if user != "" {
 		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
@@ -199,56 +215,55 @@ func socks5Connect(conn net.Conn, user, pass, host, port string) error {
 	default:
 		return fmt.Errorf("SOCKS5: unsupported auth method 0x%02x", resp[1])
 	}
+	return nil
+}
 
-	// CONNECT request — send hostname (ATYP=0x03), DNS resolved on proxy.
-	portNum, _ := strconv.Atoi(port)
-	req := make([]byte, 0, 7+len(host))
-	req = append(req, 0x05, 0x01, 0x00, 0x03, byte(len(host)))
-	req = append(req, host...)
-	req = append(req, byte(portNum>>8), byte(portNum&0xff))
+// socks5ClientRequest sends command cmd for addr ([ATYP][ADDR][2 PORT]) and
+// returns the bound address from the proxy's reply.
+func socks5ClientRequest(conn net.Conn, cmd byte, addr []byte) (bndHost string, bndPort uint16, err error) {
+	name := map[byte]string{0x01: "CONNECT", 0x03: "UDP ASSOCIATE"}[cmd]
+	req := append([]byte{0x05, cmd, 0x00}, addr...)
 	if _, err := conn.Write(req); err != nil {
-		return err
+		return "", 0, err
 	}
 
 	// response: VER REP RSV ATYP
 	var rep [4]byte
 	if _, err := io.ReadFull(conn, rep[:]); err != nil {
-		return fmt.Errorf("SOCKS5 CONNECT response: %w", err)
+		return "", 0, fmt.Errorf("SOCKS5 %s response: %w", name, err)
 	}
 	if rep[0] != 0x05 {
-		return fmt.Errorf("SOCKS5: unexpected version in CONNECT response")
+		return "", 0, fmt.Errorf("SOCKS5: unexpected version in %s response", name)
 	}
 	if rep[1] != 0x00 {
-		return fmt.Errorf("SOCKS5 CONNECT rejected: code 0x%02x", rep[1])
+		return "", 0, fmt.Errorf("SOCKS5 %s rejected: code 0x%02x", name, rep[1])
 	}
 
-	// Read and discard the bound address (required by the protocol).
+	// The bound address is required by the protocol even when unused.
+	var raw []byte
 	switch rep[3] {
 	case 0x01:
-		var buf [4]byte
-		_, err := io.ReadFull(conn, buf[:])
-		if err != nil {
-			return err
-		}
+		raw = make([]byte, 1+4+2)
 	case 0x03:
 		var l [1]byte
 		if _, err := io.ReadFull(conn, l[:]); err != nil {
-			return err
+			return "", 0, err
 		}
-		if _, err := io.ReadFull(conn, make([]byte, l[0])); err != nil {
-			return err
-		}
+		raw = make([]byte, 2+int(l[0])+2)
+		raw[1] = l[0]
 	case 0x04:
-		var buf [16]byte
-		if _, err := io.ReadFull(conn, buf[:]); err != nil {
-			return err
-		}
+		raw = make([]byte, 1+16+2)
 	default:
-		return fmt.Errorf("SOCKS5: unknown address type 0x%02x in response", rep[3])
+		return "", 0, fmt.Errorf("SOCKS5: unknown address type 0x%02x in response", rep[3])
 	}
-	var pbuf [2]byte
-	if _, err := io.ReadFull(conn, pbuf[:]); err != nil {
-		return err
+	raw[0] = rep[3]
+	off := 1
+	if rep[3] == 0x03 {
+		off = 2
 	}
-	return nil
+	if _, err := io.ReadFull(conn, raw[off:]); err != nil {
+		return "", 0, err
+	}
+	bndHost, bndPort, _, _ = parseSocksAddr(raw)
+	return bndHost, bndPort, nil
 }

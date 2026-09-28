@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,14 +187,143 @@ func TestUDPRelayDomainSource(t *testing.T) {
 	}
 }
 
-// With an upstream SOCKS5 proxy the server refuses UDP relays; the client
-// must drop the datagrams without breaking the association.
-func TestUDPRelayRefusedWithUpstreamProxy(t *testing.T) {
+// startFakeSocks5UDP starts a minimal SOCKS5 proxy that requires user/pass
+// and implements only UDP ASSOCIATE — or refuses it, like Tor or ssh -D, when
+// allowUDP is false. It reports its relay as 0.0.0.0, as proxies listening on
+// all interfaces often do. relayed counts datagrams it forwarded outwards.
+func startFakeSocks5UDP(t *testing.T, user, pass string, allowUDP bool) (addr string, relayed *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	relayed = new(atomic.Int64)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go fakeSocks5UDPConn(c, user, pass, allowUDP, relayed)
+		}
+	}()
+	return ln.Addr().String(), relayed
+}
+
+func fakeSocks5UDPConn(c net.Conn, user, pass string, allowUDP bool, relayed *atomic.Int64) {
+	defer c.Close()
+	var hdr [2]byte
+	if _, err := io.ReadFull(c, hdr[:]); err != nil {
+		return
+	}
+	io.ReadFull(c, make([]byte, hdr[1])) // offered methods
+	c.Write([]byte{0x05, 0x02})
+	var ver [2]byte
+	io.ReadFull(c, ver[:])
+	u := make([]byte, ver[1])
+	io.ReadFull(c, u)
+	var pl [1]byte
+	io.ReadFull(c, pl[:])
+	p := make([]byte, pl[0])
+	io.ReadFull(c, p)
+	if string(u) != user || string(p) != pass {
+		c.Write([]byte{0x01, 0x01})
+		return
+	}
+	c.Write([]byte{0x01, 0x00})
+
+	var req [4]byte
+	if _, err := io.ReadFull(c, req[:]); err != nil {
+		return
+	}
+	switch req[3] { // skip DST.ADDR + DST.PORT
+	case 0x01:
+		io.ReadFull(c, make([]byte, 6))
+	case 0x04:
+		io.ReadFull(c, make([]byte, 18))
+	case 0x03:
+		var l [1]byte
+		io.ReadFull(c, l[:])
+		io.ReadFull(c, make([]byte, int(l[0])+2))
+	}
+	if req[1] != 0x03 || !allowUDP {
+		c.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // command not supported
+		return
+	}
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return
+	}
+	defer pc.Close()
+	rep := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint16(rep[8:], uint16(pc.LocalAddr().(*net.UDPAddr).Port))
+	c.Write(rep)
+
+	go func() {
+		var client net.Addr
+		buf := make([]byte, 65536)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if client == nil {
+				client = from
+			}
+			if from.String() == client.String() {
+				host, port, off, ok := parseSocksAddr(buf[3:n])
+				if !ok {
+					continue
+				}
+				dst, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(int(port))))
+				if err != nil {
+					continue
+				}
+				relayed.Add(1)
+				pc.WriteTo(buf[3+off:n], dst)
+				continue
+			}
+			ua := from.(*net.UDPAddr)
+			reply := appendSocksAddr([]byte{0, 0, 0}, ua.IP.String(), uint16(ua.Port))
+			pc.WriteTo(append(reply, buf[:n]...), client)
+		}
+	}()
+	io.Copy(io.Discard, c) // the association lasts as long as this connection
+}
+
+// With an upstream proxy, UDP goes through its UDP ASSOCIATE instead of
+// leaving the server directly.
+func TestUDPRelayViaUpstreamProxy(t *testing.T) {
 	echo := startUDPEcho(t)
-	ctrl, uc := udpAssociate(t, startMuxedSocks(t, NewProxyConfig("127.0.0.1:1", "", "")))
+	proxyAddr, relayed := startFakeSocks5UDP(t, "pu", "pp", true)
+	_, uc := udpAssociate(t, startMuxedSocks(t, NewProxyConfig(proxyAddr, "pu", "pp")))
+
+	for i := 0; i < 3; i++ {
+		payload := []byte("via-proxy-" + strconv.Itoa(i))
+		h, p, got, err := udpRoundTrip(t, uc, "127.0.0.1", uint16(echo.Port), payload)
+		if err != nil {
+			t.Fatalf("round trip %d: %v", i, err)
+		}
+		if h != "127.0.0.1" || int(p) != echo.Port || !bytes.Equal(got, payload) {
+			t.Fatalf("round trip %d: got %s:%d %q", i, h, p, got)
+		}
+	}
+	if n := relayed.Load(); n != 3 {
+		t.Errorf("proxy relayed %d datagrams, want 3 (traffic bypassed the proxy?)", n)
+	}
+}
+
+// An upstream proxy without UDP support (Tor, ssh -D): datagrams are dropped
+// rather than sent around the proxy, and the association stays up.
+func TestUDPRelayUpstreamWithoutUDP(t *testing.T) {
+	echo := startUDPEcho(t)
+	proxyAddr, _ := startFakeSocks5UDP(t, "pu", "pp", false)
+	ctrl, uc := udpAssociate(t, startMuxedSocks(t, NewProxyConfig(proxyAddr, "pu", "pp")))
 
 	if _, _, _, err := udpRoundTrip(t, uc, "127.0.0.1", uint16(echo.Port), []byte("x")); err == nil {
-		t.Fatal("expected no reply when the server refuses UDP")
+		t.Fatal("got a reply although the proxy refused UDP")
 	}
 	// Control connection must still be open.
 	ctrl.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
