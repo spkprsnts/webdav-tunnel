@@ -252,4 +252,9 @@ With **xray** as the upstream, enable UDP on its SOCKS inbound:
 }
 ```
 
-If xray runs on another host, make sure the relay address it reports (the inbound's `ip` setting) is reachable from the tunnel server. The UDP leg between the tunnel server and the proxy is plain, unauthenticated UDP — SOCKS5 authenticates only the TCP control connection.
+Where xray runs decides the rest:
+
+- **Same host as the tunnel server** — point `-proxy` at `127.0.0.1` and keep xray's default `"ip": "127.0.0.1"`. The UDP leg never leaves the machine.
+- **Another host** — set the inbound's `ip` (called "IP" in panels like 3x-ui) to `0.0.0.0` or the host's public address. With the default `127.0.0.1` the relay is only reachable locally and UDP silently gets no replies. xray opens a new random UDP port for each association (not the inbound's port), so the firewall on the xray host must allow UDP from the tunnel server — ideally from its address only, since the UDP leg is plain and unauthenticated: SOCKS5 authenticates only the TCP control connection.
+
+The server log shows where UDP goes, e.g. `UDP relay opened via proxy.example.com:1080 (relay 203.0.113.7:48222)`.
