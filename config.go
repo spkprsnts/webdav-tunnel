@@ -21,6 +21,8 @@ type Config struct {
 	Proxy        string    `yaml:"proxy"`
 	DNS          string    `yaml:"dns"`
 	HealthListen string    `yaml:"health-listen"`
+	// TLSFingerprint: "chrome" (default) or "go" — see -tls-fingerprint.
+	TLSFingerprint string `yaml:"tls-fingerprint"`
 
 	// Single-backend shorthand — ignored if Backends is non-empty.
 	Webdav   string `yaml:"webdav"`

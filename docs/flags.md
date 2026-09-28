@@ -16,6 +16,7 @@
 | `-socks-pass` | client | — | SOCKS5 proxy password |
 | `-proxy` | server, selfhosted | — | Upstream SOCKS5 proxy: `socks5://[user:pass@]host:port` |
 | `-dns` | client, server | — | DNS server to resolve WebDAV backend hostnames with, e.g. `1.1.1.1:53` (default: OS resolver). Only affects reaching the backend itself — SOCKS5-tunneled traffic is always resolved server-side, never locally |
+| `-tls-fingerprint` | all | `chrome` | TLS ClientHello sent to HTTPS WebDAV backends: `chrome` mimics Chrome 133 via uTLS to match the browser User-Agent; `go` uses the standard library — only as a fallback for servers that reject the Chrome handshake. See [docs/tuning.md](tuning.md#notes) |
 | `-health-listen` | all | — | Address to serve a JSON health/status endpoint on, e.g. `127.0.0.1:9090` (default: disabled). See [docs/health.md](health.md) |
 | `-webdav-listen` | selfhosted | required (unless `-config` sets `backends:`) | Address for the embedded WebDAV server (e.g. `:8080`) |
 | `-webdav-storage` | selfhosted | `webdav-data` | Directory for session data |

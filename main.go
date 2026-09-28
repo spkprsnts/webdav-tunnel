@@ -31,6 +31,7 @@ func main() {
 	proxyStr := flag.String("proxy", "", "upstream SOCKS5 proxy for the server: socks5://[user:pass@]host:port")
 	timeout := flag.Duration("timeout", 60*time.Second, "HTTP request timeout")
 	dnsServer := flag.String("dns", "", "DNS server to resolve WebDAV backend hostnames with, e.g. 1.1.1.1:53 (default: OS resolver). Only affects reaching the backend itself, not SOCKS5-tunneled traffic")
+	tlsFingerprint := flag.String("tls-fingerprint", tunnel.TLSFingerprint, "TLS ClientHello for HTTPS WebDAV backends: chrome (uTLS, matches the browser User-Agent) | go (standard library)")
 	healthListen := flag.String("health-listen", "", "address:port to serve a JSON health/status endpoint on, e.g. 127.0.0.1:9090 (default: disabled). No authentication — bind to loopback or firewall it")
 
 	// selfhosted mode
@@ -73,7 +74,8 @@ func main() {
 			mode: mode, webdavURL: webdavURL, login: login, password: password,
 			listen: listen, socksUser: socksUser, socksPass: socksPass, proxyStr: proxyStr,
 			timeout: timeout, encrypt: encrypt, dnsServer: dnsServer, healthListen: healthListen,
-			webdavListen: webdavListen, webdavStorage: webdavStorage,
+			tlsFingerprint: tlsFingerprint,
+			webdavListen:   webdavListen, webdavStorage: webdavStorage,
 			webdavTLSCert: webdavTLSCert, webdavTLSKey: webdavTLSKey, storageOnly: storageOnly,
 			pollMin: pollMin, pollMax: pollMax, coalesce: coalesce,
 			chunkSize: chunkSize, puts: puts, readAheadMin: readAheadMin, readAheadMax: readAheadMax,
@@ -140,6 +142,13 @@ func main() {
 	tunnel.MinReadAheadWindow = *readAheadMin
 	tunnel.MaxReadAheadWindow = *readAheadMax
 
+	switch *tlsFingerprint {
+	case "chrome", "go":
+		tunnel.TLSFingerprint = *tlsFingerprint
+	default:
+		log.Fatalf("-tls-fingerprint: unknown value %q (want chrome or go)", *tlsFingerprint)
+	}
+
 	switch *mode {
 	case "client":
 		if len(cfgBackends) == 0 && *uriFlag == "" {
@@ -179,7 +188,7 @@ func main() {
 type configFlags struct {
 	mode, webdavURL, login, password            *string
 	listen, socksUser, socksPass, proxyStr      *string
-	dnsServer, healthListen                     *string
+	dnsServer, healthListen, tlsFingerprint     *string
 	timeout                                     *time.Duration
 	encrypt, storageOnly                        *bool
 	webdavListen, webdavStorage                 *string
@@ -208,6 +217,7 @@ func applyConfig(cfg *Config, explicit map[string]bool, f configFlags) {
 	setStr(f.proxyStr, "proxy", cfg.Proxy)
 	setStr(f.dnsServer, "dns", cfg.DNS)
 	setStr(f.healthListen, "health-listen", cfg.HealthListen)
+	setStr(f.tlsFingerprint, "tls-fingerprint", cfg.TLSFingerprint)
 	setStr(f.webdavListen, "webdav-listen", cfg.WebdavListen)
 	setStr(f.webdavStorage, "webdav-storage", cfg.WebdavStorage)
 	setStr(f.webdavTLSCert, "webdav-tls-cert", cfg.WebdavTLSCert)

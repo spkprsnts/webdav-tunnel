@@ -125,3 +125,15 @@ func SetDNSServer(addr string) { dnsServer = addr }
 
 // ClearDNSServer reverts to the OS resolver (default). Call before Start().
 func ClearDNSServer() { dnsServer = "" }
+
+// SetTLSFingerprint selects the TLS ClientHello sent to HTTPS WebDAV
+// backends: "chrome" (default, mimics Chrome to match the User-Agent) or
+// "go" (standard library; an escape hatch for servers that reject the
+// Chrome handshake). Call before Start().
+func SetTLSFingerprint(fp string) error {
+	if fp != "chrome" && fp != "go" {
+		return fmt.Errorf("unknown TLS fingerprint %q (want chrome or go)", fp)
+	}
+	tunnel.TLSFingerprint = fp
+	return nil
+}

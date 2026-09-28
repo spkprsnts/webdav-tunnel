@@ -27,6 +27,7 @@ enc: true
 timeout: 60s
 proxy: socks5://user:pass@host:port
 dns: 1.1.1.1:53   # resolve the WebDAV backend hostname with this server instead of the OS resolver
+tls-fingerprint: chrome   # chrome (default) | go — TLS ClientHello for HTTPS backends
 
 # Single-backend shorthand — equivalent to -webdav/-login/-password.
 # Ignored if `backends` below is non-empty.

@@ -61,6 +61,7 @@ Configure OkHttp or the system proxy to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `SetConcurrentPuts(n)` | Parallel upload limit (default 8). |
 | `SetReadAheadMin(n)` | Minimum prefetch GETs (default 3). |
 | `SetReadAheadMax(n)` | Maximum prefetch GETs (default 8). |
+| `SetTLSFingerprint(fp)` | TLS ClientHello for HTTPS backends: `"chrome"` (default) or `"go"`. |
 
 ## UDP and DNS support
 

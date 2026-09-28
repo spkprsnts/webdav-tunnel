@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 type rateLimitError struct {
@@ -38,6 +41,22 @@ func parseRetryAfter(h http.Header) time.Duration {
 	}
 	return 5 * time.Second
 }
+
+// TLSFingerprint selects the TLS ClientHello sent to HTTPS WebDAV backends:
+//
+//	"chrome" (default) — Chrome 133 via uTLS, matching the User-Agent header
+//	"go"               — the standard library's crypto/tls
+//
+// A Go ClientHello next to a Chrome User-Agent is an easy signature for DPI
+// to spot, so "go" is only an escape hatch for servers that reject the
+// Chrome handshake.
+var TLSFingerprint = "chrome"
+
+// chromeRootCAs overrides the system roots for the uTLS handshake (tests only).
+var chromeRootCAs *x509.CertPool
+
+// chromeUA must match the Chrome version of the uTLS ClientHello.
+const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 type WebDAV struct {
 	baseURL  string
@@ -95,6 +114,8 @@ func newWebDAV(baseURL, login, password string, timeout time.Duration, dnsServer
 	}
 	if insecureSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	} else if TLSFingerprint == "chrome" {
+		transport.DialTLSContext = chromeDialTLS(dialer, 15*time.Second)
 	}
 	return &WebDAV{
 		baseURL:  strings.TrimRight(baseURL, "/"),
@@ -110,8 +131,52 @@ type cfTransport struct {
 
 func (t *cfTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Mimic a regular browser to reduce Cloudflare Bot Score.
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", chromeUA)
 	return t.rt.RoundTrip(req)
+}
+
+// chromeDialTLS returns a DialTLSContext that performs a Chrome 133 TLS
+// handshake via uTLS.
+//
+// Chrome offers h2 in ALPN, but the transport only speaks HTTP/1.1 (and Go's
+// HTTP/2 frames would give the client away anyway), so ALPN is narrowed to
+// http/1.1. The rest of the ClientHello — cipher suites, extension set and
+// order shuffling, GREASE, post-quantum key share — stays Chrome's.
+func chromeDialTLS(dialer *net.Dialer, handshakeTimeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		// A fresh spec per connection: ApplyPreset mutates it, and GREASE
+		// values and extension order are randomized per spec.
+		spec, err := utls.UTLSIdToSpec(utls.HelloChrome_133)
+		if err != nil {
+			return nil, err
+		}
+		for _, ext := range spec.Extensions {
+			if alpn, ok := ext.(*utls.ALPNExtension); ok {
+				alpn.AlpnProtocols = []string{"http/1.1"}
+			}
+		}
+
+		raw, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		conn := utls.UClient(raw, &utls.Config{ServerName: host, RootCAs: chromeRootCAs}, utls.HelloCustom)
+		if err := conn.ApplyPreset(&spec); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+		defer cancel()
+		if err := conn.HandshakeContext(hsCtx); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		return conn, nil
+	}
 }
 
 func (w *WebDAV) url(path string) string {
